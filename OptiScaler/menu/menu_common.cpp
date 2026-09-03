@@ -161,6 +161,7 @@ static float lastMenuScale = 0.0f;
 static CustomOptional<uint32_t> comboPreset { 0 };
 static int lastKey = 0;
 static bool inputDlssNr = false;
+static bool inputDlssNrAb = false;
 static bool capturingKey = false;
 
 template <typename T, size_t N> struct RingBuffer
@@ -280,6 +281,8 @@ void MenuCommon::UpdateManualInput(HWND targetHwnd)
                       "Menu key pressed, will be switching FPS mode");
         CheckShortcut(config->DlssNrToggleKey.value_or_default(), inputDlssNr,
                       "Neural Rendering key pressed, will be toggling the pass");
+        CheckShortcut(config->DlssNrAbCaptureKey.value_or_default(), inputDlssNrAb,
+                      "Neural Rendering key pressed, will be taking an A/B capture");
     }
     else if (capturingKey)
     {
@@ -1315,6 +1318,17 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
         {
             inputFps = false;
             config->ShowFps = !config->ShowFps.value_or_default();
+        }
+
+        if (inputDlssNrAb)
+        {
+            inputDlssNrAb = false;
+            DlssNr::RequestAbCapture();
+
+            ImGuiToast abToast { ImGuiToastType::Info, 3000 };
+            abToast.setTitle("DLSS Neural Rendering");
+            abToast.setContent("Capturing -- hold still");
+            ImGui::InsertNotification(abToast);
         }
 
         if (inputDlssNr)
@@ -6978,12 +6992,14 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
         static auto fpsOverlayCycle = Keybind("FPS Overlay Cycle", 12);
         static auto fgEnable = Keybind("Frame Generation", 13);
         static auto dlssNrToggle = Keybind("Neural Rendering", 14);
+        static auto dlssNrAbCapture = Keybind("Neural Rendering A/B capture", 15);
 
         menu.Render(config->ShortcutKey);
         fpsOverlay.Render(config->FpsShortcutKey);
         fpsOverlayCycle.Render(config->FpsCycleShortcutKey);
         fgEnable.Render(config->FGShortcutKey);
         dlssNrToggle.Render(config->DlssNrToggleKey);
+        dlssNrAbCapture.Render(config->DlssNrAbCaptureKey);
     }
 }
 

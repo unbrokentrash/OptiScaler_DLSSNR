@@ -6,6 +6,7 @@
 
 
 #include <dlssnr/DlssNr_Capture.h>
+#include <dlssnr/DlssNr_AbCapture.h>
 #include <dlssnr/DlssNr_Proxy.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 
@@ -385,6 +386,16 @@ std::optional<double> g_lastGpuTime;
 // Writes matched before/after frames on request, so comparisons stop depending on video.
 capture::FrameCapture g_capture;
 
+// The four matched screenshots, on request. Separate from the raw capture above because it answers a
+// different question: that one writes a run of frames for measurement, this one writes one set a
+// person looks at, with the model's edit held back for one frame so the pair is a real control.
+abcapture::AbCapture g_ab;
+
+// What the last resolve actually composed with, so the capture can undo the same transform it applied
+// rather than a guess at it. Written every frame the pass runs.
+float g_lastWhitePoint = 1.0f;
+bool g_lastPassthrough = false;
+
 // One capture happens on its own each session, so there is always a fresh sample without anyone having
 // to remember to ask. Started after the scene has had a moment to settle: the first frames after a
 // feature is built carry its reset, and are not representative of anything.
@@ -434,6 +445,18 @@ void CheckCaptureTrigger()
         std::filesystem::remove(trigger, ec);
         DlssNr::RequestCapture(capture::kMaxFrames);
         LOG_INFO("DLSS-NR capture requested by trigger file");
+    }
+
+    // The A/B set has its own trigger, because it is the one worth asking for from outside the game:
+    // it wants the scene held still, and reaching for the menu to press a button is the one thing
+    // guaranteed to move it.
+    const auto abTrigger = Util::DllPath().remove_filename() / "dlssnr-ab.trigger";
+
+    if (std::filesystem::exists(abTrigger, ec))
+    {
+        std::filesystem::remove(abTrigger, ec);
+        g_ab.request();
+        LOG_INFO("DLSS-NR A/B capture requested by trigger file");
     }
 }
 
@@ -1407,6 +1430,49 @@ void ReportSkipOnce(const char* reason)
 
     if (seen.insert(reason).second)
         LOG_INFO("DLSS-NR did not run: {}", reason);
+}
+
+// The finished, upscaled frame for the A/B capture, and the sequence that drives it.
+//
+// Called from the after-upscale entry point whichever side the pass itself ran on, because that is
+// the one place in the frame where the upscaler has certainly finished writing its output. Running
+// before the upscale, the pass cannot take this shot itself: at the moment it runs, the frame it
+// would be capturing has not been rendered yet.
+void CaptureFinishedFrame(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params)
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+
+    if (g_ab.isActive())
+    {
+        ID3D12Resource* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
+        ID3D12Device* device = nullptr;
+
+        if (output != nullptr && SUCCEEDED(output->GetDevice(IID_PPV_ARGS(&device))) && device != nullptr)
+        {
+            // The same reasoning the pass applies to the output at its own entry: the upscaler leaves
+            // it wherever OutputResourceBarrier says, or as the UAV its compute wrote.
+            const D3D12_RESOURCE_STATES arrival =
+                Config::Instance()->OutputResourceBarrier.has_value()
+                    ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
+                    : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+            g_ab.recordOutput(cmdList, device, output, arrival);
+            device->Release();
+        }
+    }
+
+    if (!g_ab.tick())
+        return;
+
+    ClearCaptureDirectory();
+    const auto root = Util::DllPath().remove_filename() / "dlssnr-capture";
+    const auto written = g_ab.write(root, g_lastWhitePoint, g_lastPassthrough,
+                                    Config::Instance()->DlssNrBeforeUpscale.value_or_default());
+
+    if (!written.empty())
+        LOG_INFO("DLSS-NR wrote an A/B capture to {}", written);
+    else
+        LOG_WARN("DLSS-NR could not write the A/B capture -- see the log above for the surface format");
 }
 
 // Everything both inject points read out of the parameter block, and the one place either of them
@@ -2591,7 +2657,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
         resolveParams.Passthrough = isHdrBuffer ? 0u : 1u;
         resolveParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
-        resolveParams.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
+        // The A/B capture holds the edit back for exactly one frame. ApplyModel writes back the
+        // untouched frame the encode kept, so that frame is bit-identical to the pass being switched
+        // off -- a real control rather than an approximation of one.
+        resolveParams.ApplyModel =
+            (cfg.DlssNrApplyModel.value_or_default() && !g_ab.suppressModel()) ? 1u : 0u;
         resolveParams.CompareMode = cfg.DlssNrCompare.value_or_default();
         resolveParams.CompareSplit = cfg.DlssNrCompareSplit.value_or_default();
         resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
@@ -2699,6 +2769,16 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (g_capture.readyToWrite() && g_captureWriteAtFrame == 0)
                 g_captureWriteAtFrame = g_frames + 8;
         }
+
+        // The same frame, either side of the resolve. hdrCopy is what the encode kept untouched and
+        // the destination now holds the edit, so nothing between them differs but the model.
+        g_lastWhitePoint = whitePoint;
+        g_lastPassthrough = !isHdrBuffer;
+
+        if (g_ab.wantSeam())
+            g_ab.recordSeam(cmdList, device, g_nr.hdrCopy,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     else
     {
@@ -2792,6 +2872,9 @@ void RetryAfterFailure()
 // This is the call site's job, not the pass's. A caller that has the resources in hand -- a
 // reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
 // RunPass directly and never touches an NGX parameter block.
+void RunAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                     ID3D12CommandQueue* timingQueue);
+
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue)
 {
@@ -2801,17 +2884,26 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
-    // Silent, and not a skip worth reporting: the other entry point already ran the model a moment
-    // ago, on the frame this upscale was given.
-    if (Config::Instance()->DlssNrBeforeUpscale.value_or_default())
-        return;
-
     if (cmdList == nullptr || params == nullptr)
     {
         ReportSkipOnce("no command list or no parameter block");
         return;
     }
 
+    // Whether the model runs here at all. When it ran before the upscale this call is still made, and
+    // is still wanted: it is the only point in the frame where the finished picture exists, so the A/B
+    // capture at the bottom takes its shot from here either way.
+    if (!Config::Instance()->DlssNrBeforeUpscale.value_or_default())
+        RunAfterUpscale(cmdList, params, timingQueue);
+
+    CaptureFinishedFrame(cmdList, params);
+}
+
+// The pass over the finished frame. Split out only so the entry point above can stand down from it
+// while still reaching the capture.
+void RunAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                     ID3D12CommandQueue* timingQueue)
+{
     ID3D12Resource* target = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
     ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
     ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
@@ -3173,6 +3265,18 @@ void RequestCapture(unsigned int frames)
 
 bool CaptureInProgress() { return g_capture.isActive(); }
 
+void RequestAbCapture()
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+    g_ab.request();
+}
+
+bool AbCaptureInProgress()
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+    return g_ab.isActive();
+}
+
 void Shutdown()
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
@@ -3328,6 +3432,7 @@ void Shutdown()
     }
 
     g_capture.release();
+    g_ab.release();
     g_gpuTime.reset();
     g_ngxTime.reset();
     g_lastNgxTime.reset();

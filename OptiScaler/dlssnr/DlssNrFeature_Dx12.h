@@ -136,5 +136,14 @@ std::optional<double> LastGpuTime();
 void RequestCapture(unsigned int frames);
 bool CaptureInProgress();
 
+// Four matched screenshots: the finished frame with the model's edit held back and with it applied on
+// the next frame, plus the frame either side of the resolve within one evaluate -- which is the same
+// frame exactly, and the pair that says whether the pass is doing what it should.
+//
+// Takes two frames. Hold the camera still. Also requestable from outside the game by dropping a file
+// named dlssnr-ab.trigger beside OptiScaler, since reaching for the menu moves the scene.
+void RequestAbCapture();
+bool AbCaptureInProgress();
+
 void Shutdown();
 } // namespace DlssNr

@@ -89,6 +89,30 @@ part of the solution, and builds with everything else.
 
 ## Design notes worth knowing before changing anything
 
+- **The A/B capture answers "is it the model or is it the implementation?"** `RequestAbCapture` writes
+  four PNGs to `dlssnr-capture/ab_<timestamp>/`, and the two pairs measure different things. The seam
+  pair is **one frame**: `hdrCopy` is what the encode kept untouched and the destination holds the
+  edit, copied either side of the resolve within a single evaluate, so nothing whatsoever differs but
+  the model. That is the pair that catches a broken pass. The finished-frame pair is **two consecutive
+  frames** -- `ApplyModel` is forced off for one and left on for the next -- because running before the
+  upscale means the finished picture does not exist when the pass runs, and an upscaler cannot be asked
+  for two of them from one frame.
+
+  The suppressed frame is a real control, not an approximation: `ApplyModel = 0` writes back the frame
+  the encode kept, so the upscaler is handed something bit-identical to Neural Rendering being off.
+
+  `EvaluateAfterUpscale` is now called on both placements for this: it stands down from running the
+  model when the pass ran before the upscale, but it is still the only point in the frame where the
+  finished picture exists, so the capture takes its shot from there either way.
+
+  PNG is written by `DlssNr_Png.h` in about a hundred lines, with stored deflate blocks and no
+  compressor. Nothing in the tree writes an image and windowscodecs is not linked; adding a library to
+  the build for four files a session was the worse trade. The files are large and bit-exact, which is
+  the right way round for an argument about pixel-level detail.
+
+  Both images in a set get the same transform -- divided by the paper white the resolve used, then sRGB
+  encoded -- so they compare to each other and to nothing else. `info.txt` beside them says so.
+
 - **Which side of the upscaler it runs on is a setting, and both sides are one pass.**
   `DlssNrBeforeUpscale` (default **on**, Direct3D 12 only) shows the model the frame the upscaler is
   about to read, at render resolution -- 1707x960 for a 1440p monitor on Quality rather than

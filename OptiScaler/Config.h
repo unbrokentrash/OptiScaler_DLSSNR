@@ -275,6 +275,13 @@ class Config
     // Direct3D 12 only, which covers D3D12 games and both bridges. A game on the native Vulkan path
     // keeps the after-upscale placement whatever this says.
     CustomOptional<bool> DlssNrBeforeUpscale { true };
+
+    // Takes the four matched screenshots. Unbound by default, like the toggle above.
+    //
+    // A key rather than only a menu button because the capture wants the scene held still and opening
+    // the menu is the one action guaranteed to move it. A file named dlssnr-ab.trigger beside
+    // OptiScaler does the same thing from outside the game.
+    CustomOptional<int> DlssNrAbCaptureKey { UnboundKey };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.

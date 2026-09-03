@@ -121,6 +121,35 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nDirect3D 12 only -- a game on the native Vulkan path runs after the upscale"
                        "\nwhatever this says. Changing it rebuilds the model, so the picture pauses.");
 
+        // The comparison this whole panel exists to enable, taken by the pass itself rather than by
+        // two screenshots seconds apart.
+        ImGui::Spacing();
+
+        if (DlssNr::AbCaptureInProgress())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Capturing -- hold still.");
+        }
+        else if (ImGui::Button("Take an A/B capture"))
+        {
+            DlssNr::RequestAbCapture();
+        }
+
+        HelpMarker("Writes four screenshots to dlssnr-capture beside OptiScaler:"
+                       "\n  1_no_nr.png       the finished frame with the edit held back"
+                       "\n  2_with_nr.png     the finished frame with it applied, the next frame"
+                       "\n  3_seam_before.png what the pass was shown"
+                       "\n  4_seam_after.png  what it produced -- the SAME frame as 3, exactly"
+                       "\n\n3 and 4 are one frame copied either side of the pass, so nothing between"
+                       "\nthem differs but the model: that is the pair that says whether the pass is"
+                       "\nimplemented correctly. 1 and 2 are consecutive frames and say what it looks"
+                       "\nlike -- running before the upscale, the finished frame does not exist yet"
+                       "\nwhen the pass runs, so those two cannot be the same frame."
+                       "\n\nThe held-back frame is bit-identical to Neural Rendering being off, not an"
+                       "\napproximation of it."
+                       "\n\nIt takes two frames -- hold the camera still. Bind a key for it under"
+                       "\nKeybinds, or drop a file named dlssnr-ab.trigger beside OptiScaler, so"
+                       "\nreaching for this button does not move the scene.");
+
         bool applyModel = config->DlssNrApplyModel.value_or_default();
         if (ImGui::Checkbox("Apply the model", &applyModel))
             config->DlssNrApplyModel = applyModel;
