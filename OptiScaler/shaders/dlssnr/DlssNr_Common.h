@@ -96,6 +96,12 @@ struct DlssNrFrameInfo
     // available and is what gets used.
     unsigned int RenderSubrectWidth = 0;
     unsigned int RenderSubrectHeight = 0;
+
+    // The sub-pixel offset the upscaler jittered the camera by, in render-resolution pixels, as the
+    // game reports it. Every upscaler in the tree reads this; the pass did not, which is what left the
+    // model unable to trust its own history on a pre-upscale frame.
+    float JitterX = 0.0f;
+    float JitterY = 0.0f;
 };
 
 struct alignas(256) DlssNrConstants
@@ -180,6 +186,22 @@ struct alignas(256) DlssNrConstants
     // preExposure * trim, so the live white point is ExposurePreMul / exposure. Mirrored in the cbuffer.
     uint32_t UseGameExposure;
     float ExposurePreMul;
+
+    // The sub-pixel offset the upscaler jittered the camera by this frame, in pixels of this dispatch.
+    //
+    // Only meaningful before the upscale. The model carries temporal state and reprojects it with the
+    // motion vectors it is handed -- and those describe scene motion, not the jitter, which the
+    // upscaler adds itself. So a frame taken before the upscale moves under the model every frame in a
+    // pattern its vectors do not explain, its carried state never lines up, and it stops committing to
+    // fine detail. Showing it a de-jittered picture and putting its answer back where the jitter
+    // actually is costs two sub-pixel taps and no extra pass.
+    float JitterX;
+    float JitterY;
+
+    // 0 off, 1 subtract the offset from what the model is shown, 2 add it. Two conventions because the
+    // sign of the jitter is the game's to choose and getting it wrong doubles the error rather than
+    // removing it -- so it is settled by measurement rather than by assumption.
+    uint32_t DejitterMode;
 };
 
 class DlssNr_Common

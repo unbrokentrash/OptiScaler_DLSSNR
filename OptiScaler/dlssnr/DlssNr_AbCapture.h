@@ -245,6 +245,8 @@ struct Handoff
     bool depthInverted = false;
     float mvScaleX = 0.0f, mvScaleY = 0.0f;         // as handed to the model, after any working scale
     bool reset = false;
+    float jitterX = 0.0f, jitterY = 0.0f;           // the camera offset, in render pixels
+    unsigned int dejitterMode = 0;                  // 0 off, 1 subtract, 2 add
 
     bool exposureOffered = false;
     float preExposure = 1.0f;
@@ -635,6 +637,8 @@ class AbCapture
         std::fprintf(f, "depth inverted %s\n", h.depthInverted ? "yes" : "no");
         std::fprintf(f, "mv scale       %.4f x %.4f  (as handed over)\n", h.mvScaleX, h.mvScaleY);
         std::fprintf(f, "history reset  %s\n", h.reset ? "yes" : "no");
+        std::fprintf(f, "jitter         %+.4f, %+.4f pixels   de-jitter %s\n", h.jitterX, h.jitterY,
+                     h.dejitterMode == 0 ? "off" : (h.dejitterMode == 1 ? "on (subtract)" : "on (add)"));
         std::fprintf(f, "exposure tex   %s\n", h.exposureOffered ? "supplied" : "not supplied");
         std::fprintf(f, "pre-exposure   %.4f\n", h.preExposure);
         std::fprintf(f, "game says HDR  %s, so the colour transform is %s\n",

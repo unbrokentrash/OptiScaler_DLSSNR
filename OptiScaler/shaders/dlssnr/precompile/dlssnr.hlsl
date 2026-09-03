@@ -29,7 +29,30 @@ cbuffer Params : register(b0)
     uint  gApplyModel;     // 0 output the clean frame (pass still runs), 1 apply the model's edit
     uint  gUseGameExposure;// D3D12 source-1 only: 1 = read the game's live exposure in-shader (t4)
     float gExposurePreMul; // preExposure * trim, so the live white point is gExposurePreMul / exposure
+    float gJitterX;        // the camera's sub-pixel offset this frame, in pixels of this dispatch
+    float gJitterY;
+    uint  gDejitterMode;   // 0 off, 1 subtract it from what the model is shown, 2 add it
 };
+
+// The jitter as a UV offset, or zero when it is switched off.
+//
+// The upscaler moves the camera a fraction of a pixel every frame so it can accumulate sub-pixel
+// samples, and the motion vectors do not carry that offset -- the upscaler applies it itself. A model
+// that carries temporal state and reprojects with those vectors therefore finds its history a fraction
+// of a pixel out on every single frame, in a pattern nothing it was given explains. It responds by not
+// committing: low-frequency shading still moves, fine detail stops.
+//
+// So the picture it is shown is put back on the pixel grid before it sees it, and its answer is put
+// back where the jitter actually is on the way out. Only the model's input and its answer are
+// resampled; the frame underneath is never touched.
+float2 JitterUv()
+{
+    if (gDejitterMode == 0)
+        return float2(0.0, 0.0);
+
+    const float2 px = float2(gJitterX, gJitterY) / float2(max(gWidth, 1u), max(gHeight, 1u));
+    return gDejitterMode == 1 ? px : -px;
+}
 
 // Bringing an impossible colour back into a possible one.
 //
@@ -650,8 +673,15 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         float4 source = gSource.Load(int3(id.xy, 0));
         float3 frame = max(source.rgb, float3(0.0, 0.0, 0.0));
 
-        // Kept so the resolve has the frame as it was, rather than having to reconstruct it.
+        // Kept so the resolve has the frame as it was, rather than having to reconstruct it. This is
+        // the real frame and is never de-jittered: the edit is composed back onto it exactly as it
+        // arrived, so nothing the pass does resamples the picture the player sees.
         gKeep[id.xy] = float4(frame, source.a);
+
+        // What the model is shown, which may be shifted back onto the pixel grid. Off, this is the
+        // load above and the path is byte-identical.
+        if (gDejitterMode != 0)
+            frame = max(gSource.SampleLevel(gLinear, uv + JitterUv(), 0).rgb, float3(0.0, 0.0, 0.0));
 
         // Some games hand DLSS a frame that has already been through their tonemapper. The game says
         // which in its own DLSS creation flags, and converting one that needs no conversion is pure
@@ -733,8 +763,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     // Sampled rather than loaded: when the model ran at a reduced resolution these are smaller than the
     // frame, and its edit is enlarged here while the frame underneath stays untouched.
-    float4 proxySample = gSource.SampleLevel(gLinear, cmpUv, 0);
-    float4 modelSample = gModel.SampleLevel(gLinear, cmpUv, 0);
+    // Put the answer back where the jitter actually is. The proxy is sampled with the same shift, so
+    // the difference between them -- which is the edit -- is computed in one consistent space and only
+    // then lands on the untouched frame.
+    const float2 resolveUv = cmpUv - JitterUv();
+
+    float4 proxySample = gSource.SampleLevel(gLinear, resolveUv, 0);
+    float4 modelSample = gModel.SampleLevel(gLinear, resolveUv, 0);
 
     // Nothing was encoded on the way in, so nothing is decoded here either.
     float3 proxy = gPassthrough != 0 ? proxySample.rgb : SrgbToLinear(proxySample.rgb);

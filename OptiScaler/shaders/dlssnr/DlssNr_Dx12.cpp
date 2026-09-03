@@ -1568,6 +1568,13 @@ void ReadFrameInfo(NVSDK_NGX_Parameter* params, DlssNrFrameInfo& frame)
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY) != NVSDK_NGX_Result_Success)
         frame.MvScaleY = 1.0f;
 
+    // The jitter, which is what the model needs to be able to trust its own carried state.
+    if (params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &frame.JitterX) != NVSDK_NGX_Result_Success)
+        frame.JitterX = 0.0f;
+
+    if (params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &frame.JitterY) != NVSDK_NGX_Result_Success)
+        frame.JitterY = 0.0f;
+
     // What the game says about its own exposure. Logged, used for nothing yet.
     //
     // The white point measured from the frame turned out to be a control loop rather than a
@@ -2492,6 +2499,17 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     encodeParams.Width = width;
     encodeParams.Height = height;
 
+    // De-jitter only before the upscale. After it the frame has already had the jitter resolved out
+    // of it by the upscaler, so there is nothing to undo and the offset would be in the wrong units
+    // anyway -- the jitter is in render pixels and that frame is display sized. The after-upscale path
+    // stays byte-identical.
+    const unsigned int dejitter =
+        inPlace ? 0u : cfg.DlssNrDejitter.value_or_default();
+
+    encodeParams.JitterX = frame.JitterX;
+    encodeParams.JitterY = frame.JitterY;
+    encodeParams.DejitterMode = dejitter;
+
     Barrier(cmdList, encodeSource, encodeSourceResting,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     DispatchPass(cmdList, encodeParams, encodeSource, nullptr, nullptr, nullptr, exposureTex,
@@ -2680,6 +2698,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         h.mvScaleX = g_nr.guideMvScaleX * mvToWork;
         h.mvScaleY = g_nr.guideMvScaleY * mvToWork;
         h.reset = resetThisFrame;
+        h.jitterX = frame.JitterX;
+        h.jitterY = frame.JitterY;
+        h.dejitterMode = dejitter;
 
         h.exposureOffered = frame.ExposureTexture != nullptr;
         h.preExposure = frame.PreExposure;
@@ -2772,6 +2793,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.ExposurePreMul = exposurePreMul;
         resolveParams.Width = width;
         resolveParams.Height = height;
+        resolveParams.JitterX = frame.JitterX;
+        resolveParams.JitterY = frame.JitterY;
+        resolveParams.DejitterMode = dejitter;
         resolveParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
         resolveParams.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
         resolveParams.DebugView = cfg.DlssNrDebugView.value_or_default();

@@ -121,6 +121,36 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nDirect3D 12 only -- a game on the native Vulkan path runs after the upscale"
                        "\nwhatever this says. Changing it rebuilds the model, so the picture pauses.");
 
+        // Only meaningful on the pre-upscale side, and dimmed rather than hidden on the other so the
+        // reason it does nothing there is visible.
+        {
+            const bool before = config->DlssNrBeforeUpscale.value_or_default();
+            ImGui::BeginDisabled(!before);
+
+            static const char* dejitterNames[] = { "Off", "On (subtract)", "On (add)" };
+            int dejitter = (int) config->DlssNrDejitter.value_or_default();
+
+            if (ImGui::Combo("De-jitter the model's input", &dejitter, dejitterNames,
+                             IM_ARRAYSIZE(dejitterNames)))
+                config->DlssNrDejitter = (uint32_t) dejitter;
+
+            ImGui::EndDisabled();
+        }
+
+        HelpMarker("Puts the frame back on the pixel grid before the model sees it, and puts its answer"
+                       "\nback where the jitter actually is on the way out."
+                       "\n\nThe upscaler offsets the camera a fraction of a pixel every frame, and the"
+                       "\nmotion vectors do not carry that offset -- the upscaler applies it itself. A"
+                       "\nmodel that carries temporal state and reprojects with those vectors finds its"
+                       "\nhistory a fraction of a pixel out on every single frame, in a pattern nothing"
+                       "\nit was given explains, and responds by not committing: broad shading still"
+                       "\nmoves, fine detail stops."
+                       "\n\nTwo directions because the sign of the jitter is the game's to choose and the"
+                       "\nwrong one doubles the misalignment instead of removing it. Try one, then the"
+                       "\nother, and keep whichever makes small detail respond."
+                       "\n\nOnly the model's input and its answer are resampled -- the frame underneath is"
+                       "\nnever touched. Meaningless after the upscale, where the jitter is already gone.");
+
         // The comparison this whole panel exists to enable, taken by the pass itself rather than by
         // two screenshots seconds apart.
         ImGui::Spacing();

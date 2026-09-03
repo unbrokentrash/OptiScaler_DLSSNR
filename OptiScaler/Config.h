@@ -291,6 +291,19 @@ class Config
     // comfortably past what DLSS and FSR accumulate over; raise it if the upscaler is slower to
     // converge, at the cost of standing still for longer.
     CustomOptional<uint32_t> DlssNrAbCaptureSettle { 24 };
+
+    // Put the frame back on the pixel grid before the model sees it, and put its answer back where the
+    // jitter is on the way out. Before the upscale only; after it the upscaler has already resolved the
+    // jitter away and there is nothing to undo.
+    //
+    //   0  off
+    //   1  subtract the camera's sub-pixel offset from what the model is shown
+    //   2  add it
+    //
+    // Two directions because the sign of the jitter is the game's to choose, and the wrong one doubles
+    // the misalignment instead of removing it. Off by default until a capture says which way round it
+    // goes in a real title.
+    CustomOptional<uint32_t> DlssNrDejitter { 0 };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.

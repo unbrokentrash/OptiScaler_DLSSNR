@@ -91,6 +91,53 @@ jobs:
         echo "Version: ${{ steps.get_version.outputs.version }}"
         echo "Filename: ${{ steps.get_version.outputs.filename }}"
         
+    # The Neural Rendering composition shader ships as a checked-in blob with no source fallback, so
+    # editing dlssnr.hlsl does nothing until it is recompiled -- and the D3D12 one has to be signed by
+    # dxil.dll, which is Windows-only. Doing it here means the DLL below is built against the shader
+    # that is actually in the tree, and the regenerated headers come out as artifacts to commit.
+    - name: Recompile the Neural Rendering shader
+      shell: pwsh
+      working-directory: OptiScaler/shaders/dlssnr/precompile
+      run: |
+        $candidates = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse `
+                        -Filter dxc.exe -ErrorAction SilentlyContinue |
+                      Where-Object { $_.FullName -match '\\x64\\' } |
+                      Sort-Object FullName -Descending
+
+        if (-not $candidates) { throw "no dxc.exe in the Windows SDK" }
+
+        $dxc = $candidates[0].FullName
+        Write-Host "using $dxc"
+
+        & $dxc -T cs_6_0 -E CSMain -Fo DlssNr_Shader.cso dlssnr.hlsl
+        if ($LASTEXITCODE -ne 0) { throw "the D3D12 compile failed" }
+
+        & $dxc -T cs_6_0 -E CSMain -D VK_MODE=1 -spirv -Fo DlssNr_Shader_Vk.spv dlssnr.hlsl
+        if ($LASTEXITCODE -ne 0) { throw "the SPIR-V compile failed" }
+
+        python make_header.py DlssNr_Shader.cso    DlssNr_cso  DlssNr_Shader.h
+        python make_header.py DlssNr_Shader_Vk.spv dlssnr_spv  DlssNr_Shader_Vk.h
+
+        # Unsigned DXIL is refused at pipeline creation, and the signature is the sixteen bytes after
+        # the magic -- all zero means dxil.dll never ran and the pass would silently fail to compile.
+        $cso = [System.IO.File]::ReadAllBytes("DlssNr_Shader.cso")
+        if ([System.Text.Encoding]::ASCII.GetString($cso[0..3]) -ne "DXBC") { throw "not a DXBC container" }
+        if ((($cso[4..19]) | Where-Object { $_ -ne 0 }).Count -eq 0) { throw "the D3D12 blob is unsigned" }
+
+        $spv = [System.IO.File]::ReadAllBytes("DlssNr_Shader_Vk.spv")
+        if ([System.BitConverter]::ToUInt32($spv, 0) -ne 0x07230203) { throw "not SPIR-V" }
+
+        Write-Host "D3D12 $($cso.Length) bytes signed, Vulkan $($spv.Length) bytes"
+
+    - name: Upload the regenerated shader headers
+      uses: actions/upload-artifact@v7.0.0
+      with:
+        name: dlssnr-shader-headers
+        path: |
+          OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader.h
+          OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader_Vk.h
+        if-no-files-found: error
+
     - name: Add MSBuild to PATH
       uses: microsoft/setup-msbuild@v2
 
