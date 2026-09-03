@@ -129,8 +129,11 @@ inline float SmallFloat(uint32_t bits, int mantissaBits)
     if (exponent == 0)
         return mantissa == 0 ? 0.0f : (float) mantissa / (float) (1u << mantissaBits) * 6.103515625e-5f;
 
+    // The reserved exponent, which in a screenshot has nowhere to go. Handing back a real infinity
+    // costs a C4756 for the constant alone, and a NaN reaching the cast to a byte at the end of this
+    // file is undefined rather than merely wrong -- so both come back as something the clamp can eat.
     if (exponent == 31)
-        return mantissa == 0 ? INFINITY : NAN;
+        return mantissa == 0 ? 3.4e38f : 0.0f;
 
     return std::ldexp(1.0f + (float) mantissa / (float) (1u << mantissaBits), (int) exponent - 15);
 }
@@ -454,10 +457,18 @@ class AbCapture
 
                 for (int c = 0; c < 3; ++c)
                 {
+                    float channel = pixel[c];
+
+                    // Games do write infinities into HDR buffers, and NaN survives every comparison
+                    // below to reach a cast that has no defined answer for it. Saturate one, blacken
+                    // the other, and nothing downstream has to think about either.
+                    if (!std::isfinite(channel))
+                        channel = channel > 0.0f ? 3.4e38f : 0.0f;
+
                     // A linear frame is open-ended and has to be brought into the range a screen
                     // shows; one that is already display-referred is there already.
-                    const float v = isFloat ? LinearToSrgb(pixel[c] / divisor)
-                                            : std::min(std::max(pixel[c], 0.0f), 1.0f);
+                    const float v = isFloat ? LinearToSrgb(channel / divisor)
+                                            : std::min(std::max(channel, 0.0f), 1.0f);
                     rgb[((size_t) y * width + x) * 3 + c] = (uint8_t) (v * 255.0f + 0.5f);
                 }
             }
