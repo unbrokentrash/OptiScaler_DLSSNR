@@ -165,6 +165,27 @@ using PFN_NrProbeFloat = void(__cdecl*) (void*, const char*, float, int);
 
 // One per back buffer, so an allocator is never reset while its frame is still in flight.
 
+// The values the model latches when its feature is built, as one comparable blob.
+//
+// Only used to notice that a slider is still moving. TuningMatchesFeature answers a different
+// question -- whether the config differs from what the live feature was built with -- and cannot tell
+// a value that has just changed from one that changed thirty frames ago and has held still since.
+struct TuningSnapshot
+{
+    float v[7] = {};
+
+    bool operator!=(const TuningSnapshot& o) const
+    {
+        for (int i = 0; i < 7; ++i)
+        {
+            if (v[i] != o.v[i])
+                return true;
+        }
+
+        return false;
+    }
+};
+
 struct NrState
 {
     HMODULE forwarder = nullptr;
@@ -355,6 +376,11 @@ struct NrState
     float builtSkinStructure = 0.0f;
     bool builtAutoMask = false;
     unsigned long long settledAt = 0;
+
+    // The tuning as the config last reported it. Compared against the config every frame, so a value
+    // that is still being dragged restarts the clock instead of rebuilding the model under the drag.
+    TuningSnapshot seenTuning {};
+    bool seenTuningValid = false;
 
     // Once something fails there is no recovering it mid-session, and retrying every frame turns a
     // failure into a crash. It stays off and says why.
@@ -1373,6 +1399,19 @@ D3D12_RESOURCE_STATES InputColourState()
     return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 }
 
+TuningSnapshot SnapshotTuning(const Config& cfg)
+{
+    TuningSnapshot t;
+    t.v[0] = (float) cfg.DlssNrPreset.value_or_default();
+    t.v[1] = cfg.DlssNrIntensity.value_or_default();
+    t.v[2] = (float) cfg.DlssNrStyle.value_or_default();
+    t.v[3] = cfg.DlssNrLocalStructure.value_or_default();
+    t.v[4] = cfg.DlssNrLocalTone.value_or_default();
+    t.v[5] = cfg.DlssNrSkinStructure.value_or_default();
+    t.v[6] = cfg.DlssNrAutoMask.value_or_default() ? 1.0f : 0.0f;
+    return t;
+}
+
 void RecordBuiltTuning(const Config& cfg)
 {
     g_nr.builtPreset = cfg.DlssNrPreset.value_or_default();
@@ -2038,7 +2077,37 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // else -- a resolution change -- happened to force a rebuild by accident.
     const bool tuningChanged = !TuningMatchesFeature(cfg);
 
-    if (g_nr.feature != nullptr && (resolutionChanged || tuningChanged))
+    // Wait for the value to hold still before acting on it.
+    //
+    // kSettleFrames and settledAt were declared for this debounce and never read, so every one of
+    // these controls rebuilt the model on every frame its value moved -- and a slider reports a new
+    // value on each frame of a drag. The README's own warning says what that costs: "Rebuilding every
+    // frame exhausts the driver's latches and the feature stops responding until the process
+    // restarts". A control that appears to do nothing is exactly what that looks like from the outside,
+    // and one drag was enough to spend the session's latches.
+    //
+    // A resolution change still rebuilds at once. It has to: the surfaces underneath it are gone.
+    const TuningSnapshot nowTuning = SnapshotTuning(cfg);
+    bool tuningSettled = false;
+
+    if (!g_nr.seenTuningValid || g_nr.seenTuning != nowTuning)
+    {
+        g_nr.seenTuning = nowTuning;
+        g_nr.seenTuningValid = true;
+        g_nr.settledAt = g_frames;
+    }
+    else if (tuningChanged && g_frames - g_nr.settledAt >= kSettleFrames)
+    {
+        tuningSettled = true;
+        LOG_INFO("DLSS-NR rebuilding the model for a changed setting: preset {}, intensity {}, "
+                 "style {}, local structure {}, local tone {}, skin {}, auto mask {}",
+                 cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
+                 cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+                 cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                 cfg.DlssNrAutoMask.value_or_default());
+    }
+
+    if (g_nr.feature != nullptr && (resolutionChanged || tuningSettled))
     {
         // Parked rather than released: with frame generation the GPU can still be several frames
         // deep in work that references all of it.
@@ -2562,6 +2631,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Multi-pass was removed: re-feeding the model its own output re-opened the same-command-list
     // feature-creation hang, and the colour core is not settled enough to build on. One evaluate.
+    const bool resetThisFrame = g_nr.reset;
+
     const int result = g_nr.evaluate(
         cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
         workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
@@ -2575,6 +2646,58 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_ngxTime->End(cmdList);
 
     g_nr.reset = false;
+
+    // What the model was just handed, for the capture to write down. Read off the resources rather
+    // than inferred, and taken whether the evaluate succeeded or not -- a failure is the case where
+    // knowing what went in matters most.
+    if (g_ab.wantSeam())
+    {
+        abcapture::Handoff h;
+        h.valid = true;
+
+        const D3D12_RESOURCE_DESC dd = depthIn->GetDesc();
+        h.depthPtr = (unsigned long long) depthIn;
+        h.depthWidth = (unsigned int) dd.Width;
+        h.depthHeight = dd.Height;
+        h.depthFormat = (int) dd.Format;
+        h.depthCloned = depthIn != depth;
+
+        const D3D12_RESOURCE_DESC md = motionIn->GetDesc();
+        h.motionPtr = (unsigned long long) motionIn;
+        h.motionWidth = (unsigned int) md.Width;
+        h.motionHeight = md.Height;
+        h.motionFormat = (int) md.Format;
+        h.motionCloned = motionIn != motion;
+
+        h.guideWidth = guideWidth;
+        h.guideHeight = guideHeight;
+        h.frameWidth = width;
+        h.frameHeight = height;
+        h.modelWidth = workWidth;
+        h.modelHeight = workHeight;
+
+        h.depthInverted = g_nr.guideDepthInverted;
+        h.mvScaleX = g_nr.guideMvScaleX * mvToWork;
+        h.mvScaleY = g_nr.guideMvScaleY * mvToWork;
+        h.reset = resetThisFrame;
+
+        h.exposureOffered = frame.ExposureTexture != nullptr;
+        h.preExposure = frame.PreExposure;
+        h.colourIsLinearHdr = frame.ColourIsLinearHdr;
+        h.colourTransformOn = isHdrBuffer;
+
+        h.evaluateResult = (unsigned int) result;
+
+        h.builtPreset = g_nr.builtPreset;
+        h.builtStyle = g_nr.builtStyle;
+        h.builtIntensity = g_nr.builtIntensity;
+        h.builtLocalStructure = g_nr.builtLocalStructure;
+        h.builtLocalTone = g_nr.builtLocalTone;
+        h.builtSkin = g_nr.builtSkinStructure;
+        h.builtAutoMask = g_nr.builtAutoMask;
+
+        g_ab.recordHandoff(h);
+    }
 
     // Supersampling probe: report the model working ABOVE native so a test log tells us whether NGX even
     // accepts a super-native evaluate and what it returns. Once per working-size change, or on any error.

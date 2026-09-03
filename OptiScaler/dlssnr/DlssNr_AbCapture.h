@@ -218,6 +218,48 @@ inline bool ReadPixel(const uint8_t* row, unsigned int x, DXGI_FORMAT format, fl
     }
 }
 
+// Exactly what the model was given, read off the resources at the moment of the evaluate.
+//
+// This exists because "is it still getting depth and motion vectors?" is not answerable by reading the
+// source: the pass runs at two different points in the frame now, and what sits in the parameter block
+// at each is a question about the game and the upscaler, not about this code. Two captures taken with
+// the placement toggled produce two of these, and anything that differs is the answer.
+struct Handoff
+{
+    bool valid = false;
+
+    unsigned long long depthPtr = 0;
+    unsigned int depthWidth = 0, depthHeight = 0;
+    int depthFormat = 0;
+    bool depthCloned = false;
+
+    unsigned long long motionPtr = 0;
+    unsigned int motionWidth = 0, motionHeight = 0;
+    int motionFormat = 0;
+    bool motionCloned = false;
+
+    unsigned int guideWidth = 0, guideHeight = 0;   // the subrect the model is told to read
+    unsigned int frameWidth = 0, frameHeight = 0;   // the picture it is shown
+    unsigned int modelWidth = 0, modelHeight = 0;   // what it is asked to work at
+
+    bool depthInverted = false;
+    float mvScaleX = 0.0f, mvScaleY = 0.0f;         // as handed to the model, after any working scale
+    bool reset = false;
+
+    bool exposureOffered = false;
+    float preExposure = 1.0f;
+    bool colourIsLinearHdr = false;
+    bool colourTransformOn = false;
+
+    unsigned int evaluateResult = 0;                // 1 is success
+
+    // The tuning the live feature was actually built with, which is not the same thing as the tuning
+    // in the config -- a create-time value only reaches the model when the feature is rebuilt.
+    unsigned int builtPreset = 0, builtStyle = 0;
+    float builtIntensity = 0.0f, builtLocalStructure = 0.0f, builtLocalTone = 0.0f, builtSkin = 0.0f;
+    bool builtAutoMask = false;
+};
+
 // Takes the four shots in order and writes them out.
 class AbCapture
 {
@@ -253,6 +295,13 @@ class AbCapture
 
     // Whether the seam pair should be taken this frame. Only on the frame the model actually ran.
     bool wantSeam() const { return stage_ == Stage::AppliedFrame; }
+
+    // Records what the model was handed this frame. Called on the frame the model ran.
+    void recordHandoff(const Handoff& h)
+    {
+        if (stage_ == Stage::AppliedFrame)
+            handoff_ = h;
+    }
 
     // The frame either side of the resolve, within one evaluate. Exactly the same frame.
     void recordSeam(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* clean,
@@ -362,6 +411,8 @@ class AbCapture
 
             *s = Shot {};
         }
+
+        handoff_ = Handoff {};
 
         stage_ = Stage::Idle;
         drain_ = 0;
@@ -556,8 +607,52 @@ class AbCapture
                         "any other way.\n",
                      whitePoint, passthrough ? "off (the frame was already tone mapped)" : "on");
 
+        if (!handoff_.valid)
+        {
+            std::fprintf(f, "\nThe model did not run on the photographed frame, so there is nothing to\n"
+                            "report about what it was handed.\n");
+            std::fclose(f);
+            return;
+        }
+
+        const Handoff& h = handoff_;
+
+        std::fprintf(f, "\n\n--- what the model was handed ---------------------------------------\n\n"
+                        "Take one of these with the placement toggled each way and diff them. Anything\n"
+                        "that differs is a difference in what the model receives; anything that matches\n"
+                        "is not the explanation, whatever the pictures look like.\n\n");
+
+        std::fprintf(f, "depth          %p  %ux%u  format %d%s\n", (void*) h.depthPtr, h.depthWidth,
+                     h.depthHeight, h.depthFormat, h.depthCloned ? "  (typed copy of a typeless one)" : "");
+        std::fprintf(f, "motion vectors %p  %ux%u  format %d%s\n", (void*) h.motionPtr, h.motionWidth,
+                     h.motionHeight, h.motionFormat,
+                     h.motionCloned ? "  (typed copy of a typeless one)" : "");
+        std::fprintf(f, "guide subrect  %ux%u   (the region of those two the model is told to read)\n",
+                     h.guideWidth, h.guideHeight);
+        std::fprintf(f, "frame shown    %ux%u\n", h.frameWidth, h.frameHeight);
+        std::fprintf(f, "model works at %ux%u\n\n", h.modelWidth, h.modelHeight);
+
+        std::fprintf(f, "depth inverted %s\n", h.depthInverted ? "yes" : "no");
+        std::fprintf(f, "mv scale       %.4f x %.4f  (as handed over)\n", h.mvScaleX, h.mvScaleY);
+        std::fprintf(f, "history reset  %s\n", h.reset ? "yes" : "no");
+        std::fprintf(f, "exposure tex   %s\n", h.exposureOffered ? "supplied" : "not supplied");
+        std::fprintf(f, "pre-exposure   %.4f\n", h.preExposure);
+        std::fprintf(f, "game says HDR  %s, so the colour transform is %s\n",
+                     h.colourIsLinearHdr ? "yes" : "no", h.colourTransformOn ? "on" : "off");
+        std::fprintf(f, "evaluate       0x%X%s\n\n", h.evaluateResult,
+                     h.evaluateResult == 1 ? "  (success)" : "  (NOT success)");
+
+        std::fprintf(f, "The model latches its tuning when the feature is built, so these are the values\n"
+                        "actually in force -- not necessarily the ones in the menu:\n"
+                        "  preset %u, style %u, intensity %.3f, local structure %.3f, local tone %.3f,\n"
+                        "  skin structure %.3f, auto mask %s\n",
+                     h.builtPreset, h.builtStyle, h.builtIntensity, h.builtLocalStructure,
+                     h.builtLocalTone, h.builtSkin, h.builtAutoMask ? "on" : "off");
+
         std::fclose(f);
     }
+
+    Handoff handoff_ {};
 
     Shot noNr_ {};
     Shot withNr_ {};
