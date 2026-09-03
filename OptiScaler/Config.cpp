@@ -320,6 +320,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrBeforeUpscale.set_from_config(readBool("DlssNr", "BeforeUpscale"));
             DlssNrAbCaptureKey.set_from_config(readInt("DlssNr", "AbCaptureKey"));
+            DlssNrAbCaptureSettle.set_from_config(readUInt("DlssNr", "AbCaptureSettle"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
@@ -1210,6 +1211,8 @@ bool Config::SaveIni()
         auto abKey = Instance()->DlssNrAbCaptureKey.value_for_config();
         ini.SetValue("DlssNr", "AbCaptureKey", GetIntValue(abKey, abKey > 0).c_str());
     }
+    ini.SetValue("DlssNr", "AbCaptureSettle",
+                 GetIntValue(Instance()->DlssNrAbCaptureSettle.value_for_config()).c_str());
     ini.SetValue("DlssNr", "TransferStrength",
                  GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ColourStrength",

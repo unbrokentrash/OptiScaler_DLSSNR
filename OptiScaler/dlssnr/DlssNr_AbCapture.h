@@ -223,19 +223,33 @@ class AbCapture
 {
   public:
     // Arms a capture. Ignored while one is already running, so a held key cannot queue a hundred.
-    void request()
+    //
+    // settleFrames is how long each state is held before its shot is taken, and it is the whole
+    // difference between a measurement and a misleading number. A temporal upscaler resolves each
+    // frame by blending a small slice of the current sample -- ten to twenty-five per cent, typically
+    // -- into an accumulated history. Photographing a single edited frame therefore photographs that
+    // slice: the answer comes out at roughly a fifth of the edit and says far more about the blend
+    // weight than about the pass. Holding each state until the history is entirely of that state
+    // measures what a player actually sees.
+    void request(unsigned int settleFrames)
     {
         if (stage_ != Stage::Idle)
             return;
 
-        stage_ = Stage::SuppressedFrame;
+        settle_ = settleFrames;
+        countdown_ = settleFrames;
+        stage_ = Stage::SettlingOff;
     }
 
     bool isActive() const { return stage_ != Stage::Idle; }
 
     // Whether the model's edit must be suppressed for this frame. The resolve writes back the frame it
-    // kept, so the result is bit-identical to the pass being switched off.
-    bool suppressModel() const { return stage_ == Stage::SuppressedFrame; }
+    // kept, so the result is bit-identical to the pass being switched off -- and it stays that way for
+    // the whole settling run, so the upscaler's history is built entirely from unedited frames.
+    bool suppressModel() const
+    {
+        return stage_ == Stage::SettlingOff || stage_ == Stage::SuppressedFrame;
+    }
 
     // Whether the seam pair should be taken this frame. Only on the frame the model actually ran.
     bool wantSeam() const { return stage_ == Stage::AppliedFrame; }
@@ -263,7 +277,12 @@ class AbCapture
         if (stage_ == Stage::SuppressedFrame)
         {
             takeShot(cmd, device, output, outputState, noNr_);
-            stage_ = Stage::AppliedFrame;
+
+            // Let the edit back in, and let the upscaler's history fill with edited frames before the
+            // second shot, so the pair compares two settled pictures rather than one settled picture
+            // against a single frame of transition.
+            stage_ = Stage::SettlingOn;
+            countdown_ = settle_;
             return;
         }
 
@@ -282,6 +301,17 @@ class AbCapture
     // Call once per frame. Returns true when write() should be called.
     bool tick()
     {
+        if (stage_ == Stage::SettlingOff || stage_ == Stage::SettlingOn)
+        {
+            if (countdown_ > 0 && --countdown_ > 0)
+                return false;
+
+            // The next frame is the one photographed, and the stage has to say so before it starts,
+            // because the pass reads this at the top of the frame and the shot is taken at the end.
+            stage_ = stage_ == Stage::SettlingOff ? Stage::SuppressedFrame : Stage::AppliedFrame;
+            return false;
+        }
+
         if (stage_ != Stage::Draining)
             return false;
 
@@ -317,7 +347,7 @@ class AbCapture
         any |= dump(dir / "3_seam_before.png", seamBefore_, divisor);
         any |= dump(dir / "4_seam_after.png", seamAfter_, divisor);
 
-        writeNote(dir, whitePoint, passthrough, beforeUpscale);
+        writeNote(dir, whitePoint, passthrough, beforeUpscale, settle_);
         release();
 
         return any ? dir.string() : std::string();
@@ -335,13 +365,16 @@ class AbCapture
 
         stage_ = Stage::Idle;
         drain_ = 0;
+        countdown_ = 0;
     }
 
   private:
     enum class Stage
     {
         Idle,
-        SuppressedFrame, // the model's edit is held back; the finished frame is the control
+        SettlingOff,     // the edit is held back, and the upscaler's history is emptying of it
+        SuppressedFrame, // still held back, and this is the frame photographed
+        SettlingOn,      // the edit is back, and the history is filling with it
         AppliedFrame,    // the model runs; the seam pair and the finished frame are both taken
         Draining,        // waiting for the GPU to be past the copies
         Ready
@@ -484,7 +517,7 @@ class AbCapture
     }
 
     void writeNote(const std::filesystem::path& dir, float whitePoint, bool passthrough,
-                   bool beforeUpscale) const
+                   bool beforeUpscale, unsigned int settle) const
     {
         const auto path = dir / "info.txt";
         std::FILE* f = _wfopen(path.wstring().c_str(), L"wt");
@@ -501,10 +534,18 @@ class AbCapture
         std::fprintf(f, "3_seam_before.png  what the pass was shown\n");
         std::fprintf(f, "4_seam_after.png   what it produced -- the SAME frame as 3, exactly\n\n");
 
-        std::fprintf(f, "1 and 2 are consecutive frames: everything is equal except the edit and one\n"
-                        "frame of the game, so stand still while capturing. 3 and 4 are one frame,\n"
-                        "copied either side of the resolve, so nothing at all differs but the edit --\n"
-                        "that is the pair to read when asking whether the pass is implemented right.\n\n");
+        std::fprintf(f, "3 and 4 are one frame, copied either side of the resolve, so nothing at all\n"
+                        "differs between them but the edit. That is the pair to read when asking\n"
+                        "whether the pass is implemented right.\n\n");
+
+        std::fprintf(f, "1 and 2 each had their state held for %u frames before being photographed, so\n"
+                        "the upscaler's history was entirely of that state when the shot was taken.\n"
+                        "Without that hold the second shot would catch a single edited frame blended\n"
+                        "into a history of unedited ones, and a temporal upscaler keeps only a small\n"
+                        "slice of the current frame -- the answer would come out at about a fifth of\n"
+                        "the edit and would be measuring the blend weight, not the pass.\n\n"
+                        "The run takes roughly %u frames end to end. Hold still for all of it.\n\n",
+                     settle, settle * 2 + 12);
 
         if (beforeUpscale)
             std::fprintf(f, "Running before the upscale, 3 and 4 are at render resolution and 1 and 2\n"
@@ -525,5 +566,7 @@ class AbCapture
 
     Stage stage_ = Stage::Idle;
     int drain_ = 0;
+    unsigned int settle_ = 0;
+    unsigned int countdown_ = 0;
 };
 } // namespace abcapture

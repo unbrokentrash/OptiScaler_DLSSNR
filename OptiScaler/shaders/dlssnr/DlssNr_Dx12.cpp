@@ -455,7 +455,7 @@ void CheckCaptureTrigger()
     if (std::filesystem::exists(abTrigger, ec))
     {
         std::filesystem::remove(abTrigger, ec);
-        g_ab.request();
+        g_ab.request(Config::Instance()->DlssNrAbCaptureSettle.value_or_default());
         LOG_INFO("DLSS-NR A/B capture requested by trigger file");
     }
 }
@@ -3268,7 +3268,7 @@ bool CaptureInProgress() { return g_capture.isActive(); }
 void RequestAbCapture()
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
-    g_ab.request();
+    g_ab.request(Config::Instance()->DlssNrAbCaptureSettle.value_or_default());
 }
 
 bool AbCaptureInProgress()

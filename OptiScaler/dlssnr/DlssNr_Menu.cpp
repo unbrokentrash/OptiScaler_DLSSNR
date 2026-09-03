@@ -146,7 +146,11 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nwhen the pass runs, so those two cannot be the same frame."
                        "\n\nThe held-back frame is bit-identical to Neural Rendering being off, not an"
                        "\napproximation of it."
-                       "\n\nIt takes two frames -- hold the camera still. Bind a key for it under"
+                       "\n\nEach state is held long enough for the upscaler's history to be entirely"
+                       "\nof that state before its shot is taken -- about a second in all, so hold the"
+                       "\ncamera still for the whole run. Without that hold the second shot would catch"
+                       "\none edited frame blended into an unedited history, and would measure the"
+                       "\nupscaler's blend weight rather than the pass. Bind a key for it under"
                        "\nKeybinds, or drop a file named dlssnr-ab.trigger beside OptiScaler, so"
                        "\nreaching for this button does not move the scene.");
 

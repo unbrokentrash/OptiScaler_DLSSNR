@@ -282,6 +282,15 @@ class Config
     // the menu is the one action guaranteed to move it. A file named dlssnr-ab.trigger beside
     // OptiScaler does the same thing from outside the game.
     CustomOptional<int> DlssNrAbCaptureKey { UnboundKey };
+
+    // How long the A/B capture holds each state before photographing it.
+    //
+    // A temporal upscaler blends a slice of the current frame into an accumulated history, so a shot
+    // taken one frame after the edit is switched shows that slice and not the edit. Holding until the
+    // history is entirely of one state is what makes the two shots comparable. Twenty-four frames is
+    // comfortably past what DLSS and FSR accumulate over; raise it if the upscaler is slower to
+    // converge, at the cost of standing still for longer.
+    CustomOptional<uint32_t> DlssNrAbCaptureSettle { 24 };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
