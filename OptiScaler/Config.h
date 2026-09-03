@@ -260,6 +260,21 @@ class Config
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
+
+    // Which side of the upscaler the model runs on.
+    //
+    //   true   the upscaler's input, at render resolution -- 1707x960 for a 1440p monitor on Quality
+    //   false  the upscaler's output, at display resolution, which is where NVIDIA runs it
+    //
+    // Before the upscale the model sees (render/display)^2 of the pixels, which is under half the
+    // cost at Quality, and the upscaler then carries its detail through its own accumulation rather
+    // than the model landing on an already resolved frame. What it gives up is the frame it is shown:
+    // jittered and aliased rather than resolved, and the upscaler is free to reject some of what it
+    // synthesised on it.
+    //
+    // Direct3D 12 only, which covers D3D12 games and both bridges. A game on the native Vulkan path
+    // keeps the after-upscale placement whatever this says.
+    CustomOptional<bool> DlssNrBeforeUpscale { true };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.

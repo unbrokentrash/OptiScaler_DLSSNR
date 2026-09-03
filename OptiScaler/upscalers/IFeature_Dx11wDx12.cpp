@@ -456,8 +456,22 @@ bool IFeature_Dx11wDx12::Evaluate(ID3D11DeviceContext* InDeviceContext, NVSDK_NG
             InParameters->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask,
                               (void*) dx11Reactive.Dx12Resource);
 
+        // Neural Rendering before the upscale, on the D3D12 copy of the game's colour. The block
+        // above has just been pointed at that copy, so the pass reads exactly what the upscaler is
+        // about to read, at render resolution, and hands it back an edited one in its place.
+        bool nrSwapped = false;
+
+        if (Config::Instance()->DlssNrEnabled.value_or_default())
+        {
+            ScopedSkipHeapCapture skipHeapCapture {};
+            nrSwapped = DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue);
+        }
+
         LOG_DEBUG("Dispatch!!");
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
+
+        if (nrSwapped)
+            DlssNr::RestoreInputColour(InParameters);
 
         // DLSS 5 Neural Rendering rides the bridge: at this moment the block carries the D3D12 copies
         // of every input, the list is still recording, and the model's edit lands on the D3D12 output

@@ -5,7 +5,7 @@
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
 
-// DLSS 5 Neural Rendering, run over the upscaler's output.
+// DLSS 5 Neural Rendering, run over the upscaler's input or its output.
 //
 // Neural Rendering is a post-process, not an upscaler and not a denoiser: it takes a finished frame plus
 // depth and motion vectors and synthesises detail. NVIDIA ships no public integration for it, so it is
@@ -32,6 +32,25 @@ namespace DlssNr
 // game never does -- so without this the pass runs and never reports what it cost.
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue = nullptr);
+
+
+// The same pass, on the other side of the upscaler: the model is shown the frame the upscaler is about
+// to consume, at render resolution, and the upscaler then enlarges its answer along with everything
+// else. Which of the two runs is DlssNrBeforeUpscale; the other one stands down.
+//
+// The game's colour buffer is an upscaler input and carries no unordered-access flag, so it cannot be
+// written in place: the composed frame goes to a copy and NVSDK_NGX_Parameter_Color is pointed at that
+// copy for the length of the evaluate. Returns true when that swap happened, and the caller MUST call
+// RestoreInputColour once the upscaler has run -- the parameter block is the game's and outlives the
+// call.
+//
+// Direct3D 12 only. A game on the native Vulkan path keeps the after-upscale placement.
+bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                           ID3D12CommandQueue* timingQueue = nullptr);
+
+// Puts the game's own colour back in the parameter block. Harmless when nothing was swapped, so it can
+// be called on any path out of an evaluate.
+void RestoreInputColour(NVSDK_NGX_Parameter* params);
 
 
 

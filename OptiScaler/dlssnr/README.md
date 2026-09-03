@@ -89,6 +89,42 @@ part of the solution, and builds with everything else.
 
 ## Design notes worth knowing before changing anything
 
+- **Which side of the upscaler it runs on is a setting, and both sides are one pass.**
+  `DlssNrBeforeUpscale` (default **on**, Direct3D 12 only) shows the model the frame the upscaler is
+  about to read, at render resolution -- 1707x960 for a 1440p monitor on Quality rather than
+  2560x1440, which is 44% of the pixels and most of the cost. `Dispatch` already took `colour` and
+  `output` as separate arguments and ignored the first; this is what makes it mean something, so the
+  only difference between the placements is which texture is read and which is written. In place they
+  are the same texture and every barrier added for the split collapses to a no-op.
+
+  Two things the split needs that the in-place case does not. The game's colour buffer is an upscaler
+  input and carries no unordered-access flag, so it cannot be written: the composed frame goes to a
+  copy (`AcquireInputEdit`) and `NVSDK_NGX_Parameter_Color` is pointed at that copy for the length of
+  the evaluate, then put back -- both the typed and untyped spellings, because a real NGX block keeps
+  them in separate slots and OptiScaler hands the game a real one whenever DLSS is enabled. And the
+  state that copy is handed over in has to be the state the upscaler believes a colour buffer is in:
+  `InputColourState` is the `ColorResourceBarrier` twin of the `OutputResourceBarrier` reasoning at the
+  top of `Dispatch`, Unreal branch included, and it *writes* the hotfix in that branch so the upscaler
+  reaches the same answer instead of transitioning our texture out of a state it was never in.
+
+  `Dispatch` returns whether it actually composed, because the caller hands that copy to the upscaler
+  on the strength of it: a frame the pass declined -- the one the feature is built on, a missing guide,
+  a failure -- must leave the upscaler reading the game's own colour.
+
+  Frame hold works either way. Split, it cannot copy the frozen frame back over the game's buffer, so
+  the encode reads the frozen copy where it lies instead -- same frame, one copy fewer.
+
+  What it trades: NVIDIA's own placement is the finished frame -- the DLSS 5 report describes the
+  model as synthesising "the final displayed image from the rendered frame", measured at 4K -- and
+  before the upscale it is shown a jittered, aliased frame that the upscaler is then free to reject
+  some of. Against that, the upscaler carries the model's detail through its own temporal accumulation
+  rather than the model landing on a frame that already has one.
+
+  **Not ported to the native Vulkan path.** `DlssNrFeature_Vk` is a separate implementation with
+  explicit image layouts, and swapping the colour there means wrapping a `NVSDK_NGX_Resource_VK` of
+  our own. A native Vulkan game runs after the upscale whatever the setting says; the Vulkan-on-D3D12
+  bridge gets the new placement like any other D3D12 caller.
+
 - **Ratio composition, not a delta.** The model is shown an encoded proxy; what it returns is
   composed back as a ratio against the original's luminance, scaled by a measured slope, with the
   chroma added. Composing it additively — which earlier revisions did — discards the model's

@@ -211,6 +211,21 @@ struct NrState
     // The frame shrunk for the model, when it is working below full resolution.
     ID3D12Resource* colorSmall = nullptr;
 
+    // The upscaler's input colour, edited.
+    //
+    // Only used when the pass runs before the upscale. The game's colour buffer is an input to the
+    // upscaler and carries no unordered-access flag, so it cannot be written in place; the composed
+    // frame lands here instead and the parameter block is pointed at this for the evaluate.
+    ID3D12Resource* inputEdit = nullptr;
+
+    // Where that texture rests between passes. It is handed to the upscaler, which transitions it the
+    // way it transitions any colour buffer, so the pass has to put it back where that expects it --
+    // and the hotfix that decides where can change under a running session.
+    D3D12_RESOURCE_STATES inputEditState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    unsigned int inputEditWidth = 0;
+    unsigned int inputEditHeight = 0;
+    DXGI_FORMAT inputEditFormat = DXGI_FORMAT_UNKNOWN;
+
     // Supersampling (working scale > 1): the Output Scaling upsampler used to enlarge the proxy to the
     // model's larger-than-native working size with a real filter instead of the box minifier. Created
     // lazily on the first super-native frame, released in Shutdown; sizes from the resources each call,
@@ -1061,8 +1076,11 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
     return slider;
 }
 
+// allowRenderTarget is for the texture handed to the upscaler in place of the game's colour: the
+// upscaler transitions a colour buffer out of whatever state the game left it in, and in an Unreal
+// title that state is RENDER_TARGET. A texture created without the flag cannot legally be in it.
 ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width,
-                              unsigned int height)
+                              unsigned int height, bool allowRenderTarget = false)
 {
     D3D12_HEAP_PROPERTIES heap {};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -1078,6 +1096,9 @@ ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned
     desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     // The model writes its result, so the destination has to be a UAV.
     desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    if (allowRenderTarget)
+        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
     ID3D12Resource* res = nullptr;
     device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
@@ -1297,6 +1318,38 @@ bool TuningMatchesFeature(const Config& cfg)
            g_nr.builtAutoMask == cfg.DlssNrAutoMask.value_or_default();
 }
 
+// What state the game leaves its colour buffer in.
+//
+// The output has OutputResourceBarrier and the reasoning above it; this is the same question asked of
+// the other end of the upscaler, and the answer is arrived at the same way. There is no asking a
+// resource what state it is in, so this mirrors, exactly, what every D3D12 upscaler in this tree
+// already does to the same buffer: the ColorResourceBarrier hotfix when it is set (FFXFeature_Dx12.cpp
+// :148 and the FSR2 / XeSS equivalents), RENDER_TARGET for an Unreal title, and otherwise the NGX
+// contract's own NON_PIXEL_SHADER_RESOURCE.
+//
+// Mirroring rather than deciding is the point. Running before the upscale means reading the game's
+// colour before the upscaler does and handing the upscaler a texture of ours in its place, so both
+// have to agree about what state a colour buffer is in -- and the Unreal branch below WRITES the
+// hotfix, which is how the upscaler comes to the same answer a moment later instead of transitioning
+// our texture out of a state it was never in.
+D3D12_RESOURCE_STATES InputColourState()
+{
+    auto& cfg = *Config::Instance();
+
+    if (cfg.ColorResourceBarrier.has_value())
+        return (D3D12_RESOURCE_STATES) cfg.ColorResourceBarrier.value();
+
+    if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
+        State::Instance().gameEngine == GameEngineType::Unreal ||
+        State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
+    {
+        cfg.ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_RENDER_TARGET);
+        return D3D12_RESOURCE_STATE_RENDER_TARGET;
+    }
+
+    return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+}
+
 void RecordBuiltTuning(const Config& cfg)
 {
     g_nr.builtPreset = cfg.DlssNrPreset.value_or_default();
@@ -1354,6 +1407,161 @@ void ReportSkipOnce(const char* reason)
 
     if (seen.insert(reason).second)
         LOG_INFO("DLSS-NR did not run: {}", reason);
+}
+
+// Everything both inject points read out of the parameter block, and the one place either of them
+// asks the game a question.
+//
+// One evaluate runs one of the two, never both, so the report statics inside stay once-per-frame.
+void ReadFrameInfo(NVSDK_NGX_Parameter* params, DlssNrFrameInfo& frame)
+{
+    // Which of the game's APIs this evaluate arrived through.
+    //
+    // Says out loud what was previously only reasoned about: an FSR or XeSS title reaches this pass
+    // transitively, because those shims call OptiScaler's own NVSDK_NGX_D3D12_EvaluateFeature and
+    // this pass hangs off that. Nothing needed adding to the shims -- a call there would run the
+    // model twice -- but "nothing needed adding" is a claim, and this is the line that checks it.
+    {
+        static ApiUpscalerInput saidApi = (ApiUpscalerInput) -1;
+        const ApiUpscalerInput api = State::Instance().currentInputApiName;
+
+        if (saidApi != api)
+        {
+            saidApi = api;
+            LOG_INFO("DLSS-NR reached through the game's {} input", ApiUpscalerInputName(api));
+        }
+    }
+
+    unsigned int createFlags = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
+
+    frame.DepthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
+    frame.ColourIsLinearHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
+
+    // The game telling the upscaler to forget everything it has accumulated: a cut, a teleport, a
+    // load. Every upscaler in this tree reads it and this pass did not, so the model's history was
+    // only ever reset by things that happened to us -- a resize, a rebuild, a recovery from failure
+    // -- and never by anything that happened in the game. Across a cut the model was reprojecting
+    // the previous scene onto the new one and being asked to reconcile them.
+    //
+    // Read the same way FFXFeature_Dx12 reads it, including leaving it alone when the parameter is
+    // absent: a game that never sets it is not asking for a reset every frame.
+    {
+        unsigned int gameReset = 0;
+
+        if (params->Get(NVSDK_NGX_Parameter_Reset, &gameReset) == NVSDK_NGX_Result_Success)
+            frame.Reset = gameReset != 0;
+    }
+
+    // How much of the guides is real. See DlssNrFrameInfo -- zero means the game did not say.
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &frame.RenderSubrectWidth);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &frame.RenderSubrectHeight);
+
+    if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
+        frame.MvScaleX = 1.0f;
+
+    if (params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY) != NVSDK_NGX_Result_Success)
+        frame.MvScaleY = 1.0f;
+
+    // What the game says about its own exposure. Logged, used for nothing yet.
+    //
+    // The white point measured from the frame turned out to be a control loop rather than a
+    // measurement: the pass writes into the buffer it reads, most games adapt their exposure to the
+    // finished frame, and the two chase each other -- 0.01 to 97.9 in one Enshrouded session. Any
+    // statistic taken from a frame we modify has that problem.
+    //
+    // These do not. DLSS.Pre.Exposure is the scale the game applied before handing the buffer over,
+    // and ExposureTexture is a 1x1 the game fills with the exposure it is using; both are the game's
+    // own numbers, decided upstream of anything here. Whether either is close to the divisor the model
+    // actually wants is unknown, which is why this only prints them.
+    //
+    // The auto-exposure flag decides whether the texture means anything: with it set the game is
+    // telling DLSS to work exposure out for itself and may supply nothing. OptiScaler forces that flag
+    // on for eighteen games, so it is logged too -- reading a value whose flag has been overridden is
+    // how the debug views lied earlier tonight.
+    {
+        float preExposure = 0.0f;
+        const bool havePre =
+            params->Get(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, &preExposure) == NVSDK_NGX_Result_Success;
+
+        void* exposureTex = nullptr;
+        params->Get(NVSDK_NGX_Parameter_ExposureTexture, &exposureTex);
+
+        frame.ExposureTexture = exposureTex;
+        frame.PreExposure = havePre && preExposure > 1e-6f ? preExposure : 1.0f;
+
+        g_nr.exposureOfferedNow = exposureTex != nullptr;
+        g_nr.exposureEverOffered = g_nr.exposureEverOffered || g_nr.exposureOfferedNow;
+        g_nr.exposureFrames++;
+
+        const bool autoExposureFlag = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_AutoExposure) != 0;
+
+        struct ExposureReport
+        {
+            bool valid;
+            float pre;
+            bool havePre;
+            bool haveTexture;
+            bool autoFlag;
+        };
+
+        static ExposureReport logged {};
+        const ExposureReport now { true, havePre ? preExposure : 0.0f, havePre, exposureTex != nullptr,
+                                   autoExposureFlag };
+
+        if (!logged.valid || logged.havePre != now.havePre || logged.haveTexture != now.haveTexture ||
+            logged.autoFlag != now.autoFlag ||
+            std::abs(logged.pre - now.pre) > std::max(0.01f * std::abs(now.pre), 1e-4f))
+        {
+            logged = now;
+            LOG_INFO("DLSS-NR exposure from the game: DLSS.Pre.Exposure {}, ExposureTexture {}, "
+                     "auto-exposure flag {}",
+                     now.havePre ? std::to_string(now.pre) : std::string("not supplied"),
+                     now.haveTexture ? "supplied" : "not supplied", now.autoFlag ? "set" : "clear");
+        }
+
+        // The value itself, once it has come back off the GPU. Separate from the line above because
+        // that one says what the game offers and this one says what it actually reads -- and because
+        // the reading arrives three frames after the offer.
+        static float loggedExposure = -1.0f;
+
+        if (g_nr.gameExposure > 1e-6f &&
+            std::abs(loggedExposure - g_nr.gameExposure) > std::max(0.02f * g_nr.gameExposure, 1e-5f))
+        {
+            loggedExposure = g_nr.gameExposure;
+            LOG_INFO("DLSS-NR game exposure {:.5f} (pre-exposure {:.3f}) -> white point would be {:.2f}",
+                     g_nr.gameExposure, g_nr.gamePreExposure, g_nr.gamePreExposure / g_nr.gameExposure);
+        }
+
+        // The scan's number, on the same cadence, so one log carries both.
+        //
+        // This is the whole validation. In a game that hands over an exposure texture there is a
+        // known-correct value; if the scan's candidate tracks it, the scan found the right buffer
+        // rather than merely a moving one, and can be trusted where a game hands over nothing.
+        // Comparing two numbers after the fact needs both written down, and until now the scan's
+        // value existed only in a menu nobody can read while playing.
+        {
+            int which = 0;
+            float low = 0.0f, high = 0.0f;
+            const float scanned = DlssNr::ExposureScan::BestValue(&which, &low, &high);
+
+            static float loggedScan = -1.0f;
+
+            if (scanned > 0.0f && std::abs(loggedScan - scanned) > std::max(0.02f * scanned, 1e-6f))
+            {
+                loggedScan = scanned;
+
+                if (g_nr.gameExposure > 1e-6f)
+                    LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  the "
+                             "game's own exposure is {:.5f}  |  ratio {:.4f}",
+                             which, scanned, low, high, g_nr.gameExposure, scanned / g_nr.gameExposure);
+                else
+                    LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  this "
+                             "game supplies no exposure to compare against",
+                             which, scanned, low, high);
+            }
+        }
+    }
 }
 
 } // namespace
@@ -1489,7 +1697,79 @@ DlssNr_Dx12::~DlssNr_Dx12()
     }
 }
 
-void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
+ID3D12Resource* DlssNr_Dx12::AcquireInputEdit(ID3D12GraphicsCommandList* cmdList,
+                                              ID3D12Resource* colour, unsigned int width,
+                                              unsigned int height)
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+
+    if (g_nr.failed || cmdList == nullptr || colour == nullptr || width == 0 || height == 0)
+        return nullptr;
+
+    ID3D12Device* device = nullptr;
+
+    if (FAILED(colour->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+        return nullptr;
+
+    const DXGI_FORMAT format = colour->GetDesc().Format;
+
+    if (g_nr.inputEdit != nullptr && (g_nr.inputEditWidth != width || g_nr.inputEditHeight != height ||
+                                      g_nr.inputEditFormat != format))
+    {
+        // Parked rather than released: the upscaler was handed this a frame or two ago and the GPU may
+        // not be past it, which is the rule everything else here obeys.
+        ParkNrResource(g_nr.inputEdit);
+        g_nr.inputEditState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+
+    if (g_nr.inputEdit == nullptr)
+    {
+        // Exactly the render rect rather than the game's own texture size. An upscaler that finds a
+        // colour buffer bigger than the rect it was told to read has a workaround for that case, and
+        // there is no reason to send it down that path.
+        g_nr.inputEdit = CreateScratch(device, format, width, height, true);
+
+        // The render-target flag is only wanted so the texture can sit in RENDER_TARGET for an Unreal
+        // title, and a format that will not take it is not worth losing the pass over.
+        if (g_nr.inputEdit == nullptr)
+        {
+            LOG_WARN("DLSS-NR: format {} would not take a render-target flag, trying without it",
+                     (int) format);
+            g_nr.inputEdit = CreateScratch(device, format, width, height);
+        }
+
+        if (g_nr.inputEdit == nullptr)
+        {
+            LOG_ERROR("DLSS-NR could not allocate the edited input colour ({}x{}, format {})", width,
+                      height, (int) format);
+            device->Release();
+            return nullptr;
+        }
+
+        g_nr.inputEditState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        g_nr.inputEditWidth = width;
+        g_nr.inputEditHeight = height;
+        g_nr.inputEditFormat = format;
+        LOG_INFO("DLSS-NR will edit the upscaler's input at {}x{}", width, height);
+    }
+
+    device->Release();
+
+    // It is created as a UAV, and the hotfix deciding where a colour buffer rests can change under a
+    // running session, so the move is made rather than assumed. Dispatch asks the same question to
+    // work out where it will find this, so the two cannot disagree within a frame.
+    const D3D12_RESOURCE_STATES resting = InputColourState();
+
+    if (g_nr.inputEditState != resting)
+    {
+        Barrier(cmdList, g_nr.inputEdit, g_nr.inputEditState, resting);
+        g_nr.inputEditState = resting;
+    }
+
+    return g_nr.inputEdit;
+}
+
+bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
                            ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
                            const DlssNrFrameInfo& frame, ID3D12CommandQueue* timingQueue)
 {
@@ -1500,7 +1780,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         motion == nullptr || output == nullptr)
     {
         ReportSkipOnce(g_nr.failed ? "it already failed this session" : "a resource was missing");
-        return;
+        return false;
     }
 
     ID3D12Resource* target = output;
@@ -1516,14 +1796,36 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
             : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-    Barrier(cmdList, target, outputArrival, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // Whether the pass edits the frame in place.
+    //
+    // In place is the finished frame: the upscaler's output, read and written as one texture, which is
+    // what every call site did until the model was given the option of running before the upscale
+    // instead. Split is that other placement -- the frame read is the game's own colour buffer, an
+    // upscaler input carrying no unordered-access flag, so the edit goes to a copy the caller then
+    // hands the upscaler in its place. `colour` had been a parameter this pass accepted and ignored;
+    // this is what makes it mean something.
+    //
+    // Everything downstream of the encode is unchanged by the split. Only the reads move.
+    const bool inPlace = colour == target;
+
+    // Where the frame being read rests between passes. In place that is the output's own normalised
+    // UAV, exactly as before; split, it is the game's buffer, put back after every read because the
+    // upscaler is about to make the same transition itself and has to find it where it expects.
+    const D3D12_RESOURCE_STATES colourResting =
+        inPlace ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : InputColourState();
+
+    // And where the destination rests. Split, it is handed to the upscaler as a colour buffer rather
+    // than left as a finished output, so it arrives and leaves in the colour state instead.
+    const D3D12_RESOURCE_STATES targetArrival = inPlace ? outputArrival : colourResting;
+
+    Barrier(cmdList, target, targetArrival, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     ID3D12Device* device = nullptr;
 
     if (FAILED(target->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
     {
         ReportSkipOnce("the output texture belongs to no D3D12 device");
-        return;
+        return false;
     }
 
     const D3D12_RESOURCE_DESC desc = target->GetDesc();
@@ -1645,7 +1947,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.failed = true;
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
         device->Release();
-        return;
+        return false;
     }
 
     // What the model works at. The frame and its edit stay full resolution; only the model's input and
@@ -1754,7 +2056,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
             device->Release();
-            return;
+            return false;
         }
 
         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
@@ -1782,7 +2084,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_ERROR("DLSS-NR create failed: init 0x{:X} ({}), create 0x{:X} ({})", initResult,
                       NgxResultName(initResult), createResult, NgxResultName(createResult));
             device->Release();
-            return;
+            return false;
         }
 
         g_nr.width = width;
@@ -1796,13 +2098,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // GPU (every crash died on a creation frame). The creation goes through the game's own submit
         // first; the first evaluate happens next frame. One frame without the model is invisible.
         device->Release();
-        return;
+        return false;
     }
 
     if (g_nr.feature == nullptr)
     {
         device->Release();
-        return;
+        return false;
     }
 
     // The upscaler has just written this, so it is a UAV. The model needs it readable.
@@ -1834,7 +2136,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.reason = "the colour codec would not compile";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
         device->Release();
-        return;
+        return false;
     }
 
     // What the upscaler produces is linear HDR with an open-ended range; the model was trained on
@@ -1882,7 +2184,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // It was not released here, and this is the one path a bindless game takes every single frame
         // -- so the game that most needed this skip was also leaking a device reference per frame.
         device->Release();
-        return;
+        return false;
     }
 
     // From here on the pass binds its own root signature, heaps and pipeline. Everything below runs
@@ -1932,12 +2234,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         meterParams.Width = 1;
         meterParams.Height = 1;
 
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        DispatchPass(cmdList, meterParams, target, nullptr, nullptr,
+        Barrier(cmdList, colour, colourResting, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        DispatchPass(cmdList, meterParams, colour, nullptr, nullptr,
                      (ID3D12Resource*) frame.ExposureTexture, nullptr, g_nr.meter, nullptr);
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(cmdList, colour, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, colourResting);
 
         CopyMeterToReadback(cmdList, device, true);
         ConsumeMeterReadback();
@@ -1970,12 +2270,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     //
     // `target` is UAV here (normalised at entry, restored by the meter block above). The held copy is
     // left in COPY_SOURCE after capture and stays there for every restore.
+    //
+    // Running before the upscale, the frame being frozen is the game's own colour buffer, which is not
+    // ours to write -- so instead of copying the frozen frame back over it, the encode is pointed at
+    // the frozen copy directly. Same frame, one copy fewer, and nothing of the game's is touched.
+    ID3D12Resource* encodeSource = colour;
+    D3D12_RESOURCE_STATES encodeSourceResting = colourResting;
+
     {
         const bool hold = cfg.DlssNrHoldFrame.value_or_default();
 
         if (hold)
         {
-            const D3D12_RESOURCE_DESC td = target->GetDesc();
+            const D3D12_RESOURCE_DESC td = colour->GetDesc();
             const bool needCapture = !g_nr.heldActive || g_nr.heldColor == nullptr ||
                                      (unsigned int) td.Width != g_nr.heldWidth ||
                                      td.Height != g_nr.heldHeight || td.Format != g_nr.heldFormat;
@@ -1991,15 +2298,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
                 if (g_nr.heldColor != nullptr)
                 {
-                    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Barrier(cmdList, colour, colourResting, D3D12_RESOURCE_STATE_COPY_SOURCE);
                     Barrier(cmdList, g_nr.heldColor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                             D3D12_RESOURCE_STATE_COPY_DEST);
-                    cmdList->CopyResource(g_nr.heldColor, target);
+                    cmdList->CopyResource(g_nr.heldColor, colour);
                     Barrier(cmdList, g_nr.heldColor, D3D12_RESOURCE_STATE_COPY_DEST,
                             D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    Barrier(cmdList, colour, D3D12_RESOURCE_STATE_COPY_SOURCE, colourResting);
 
                     g_nr.heldActive = true;
                     g_nr.heldWidth = (unsigned int) td.Width;
@@ -2008,7 +2313,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     g_nr.heldWhitePoint = whitePoint;
                 }
             }
-            else
+            else if (inPlace)
             {
                 // Held: restore the frozen frame onto the live output before the encode reads it.
                 Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -2016,6 +2321,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 cmdList->CopyResource(target, g_nr.heldColor);
                 Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_DEST,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+            else
+            {
+                // Held, and the frame read is the game's. Read the frozen copy where it lies.
+                encodeSource = g_nr.heldColor;
+                encodeSourceResting = D3D12_RESOURCE_STATE_COPY_SOURCE;
             }
 
             // Suspend white-point measurement while held: use the snapshot so it cannot drift and
@@ -2046,13 +2357,13 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     encodeParams.Width = width;
     encodeParams.Height = height;
 
-    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    Barrier(cmdList, encodeSource, encodeSourceResting,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, nullptr, exposureTex,
+    DispatchPass(cmdList, encodeParams, encodeSource, nullptr, nullptr, nullptr, exposureTex,
                         g_nr.colorCopy, g_nr.hdrCopy);
 
-    Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Barrier(cmdList, encodeSource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            encodeSourceResting);
     // The transitions double as the wait for the encode's writes.
     Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -2141,9 +2452,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.failed = true;
         g_nr.reason = "the game's depth or motion vectors could not be made readable";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
-        return;
+        return false;
     }
 
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
@@ -2175,9 +2486,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                       proxyResult, NgxResultName(proxyResult));
         }
 
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
-        return;
+        return false;
     }
 
     if (g_ngxTime != nullptr)
@@ -2253,6 +2564,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
                  cfg.DlssNrStyle.value_or_default());
     }
+
+    // Only the resolve writing the destination counts as a run. Before the upscale the caller hands
+    // that destination to the upscaler on the strength of this, so a frame the pass did not compose --
+    // the one the feature is created on, a missing guide, a failure -- has to say so rather than
+    // leaving the upscaler to read a texture nothing wrote.
+    bool composed = false;
 
     if (result == NVSDK_NGX_Result_Success)
     {
@@ -2361,6 +2678,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
                             exposureTex, target, nullptr);
+        composed = true;
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -2453,9 +2771,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Hand the output back in the state the upscaler and the game expect.
-    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+    Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
 
     device->Release();
+    return composed;
 }
 
 namespace DlssNr
@@ -2482,27 +2801,15 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
+    // Silent, and not a skip worth reporting: the other entry point already ran the model a moment
+    // ago, on the frame this upscale was given.
+    if (Config::Instance()->DlssNrBeforeUpscale.value_or_default())
+        return;
+
     if (cmdList == nullptr || params == nullptr)
     {
         ReportSkipOnce("no command list or no parameter block");
         return;
-    }
-
-    // Which of the game's APIs this evaluate arrived through.
-    //
-    // Says out loud what was previously only reasoned about: an FSR or XeSS title reaches this pass
-    // transitively, because those shims call OptiScaler's own NVSDK_NGX_D3D12_EvaluateFeature and
-    // this pass hangs off that. Nothing needed adding to the shims -- a call there would run the
-    // model twice -- but "nothing needed adding" is a claim, and this is the line that checks it.
-    {
-        static ApiUpscalerInput saidApi = (ApiUpscalerInput) -1;
-        const ApiUpscalerInput api = State::Instance().currentInputApiName;
-
-        if (saidApi != api)
-        {
-            saidApi = api;
-            LOG_INFO("DLSS-NR reached through the game's {} input", ApiUpscalerInputName(api));
-        }
     }
 
     ID3D12Resource* target = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
@@ -2519,137 +2826,8 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
-    unsigned int createFlags = 0;
-    params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
-
     DlssNrFrameInfo frame {};
-    frame.DepthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
-    frame.ColourIsLinearHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
-
-    // The game telling the upscaler to forget everything it has accumulated: a cut, a teleport, a
-    // load. Every upscaler in this tree reads it and this pass did not, so the model's history was
-    // only ever reset by things that happened to us -- a resize, a rebuild, a recovery from failure
-    // -- and never by anything that happened in the game. Across a cut the model was reprojecting
-    // the previous scene onto the new one and being asked to reconcile them.
-    //
-    // Read the same way FFXFeature_Dx12 reads it, including leaving it alone when the parameter is
-    // absent: a game that never sets it is not asking for a reset every frame.
-    {
-        unsigned int gameReset = 0;
-
-        if (params->Get(NVSDK_NGX_Parameter_Reset, &gameReset) == NVSDK_NGX_Result_Success)
-            frame.Reset = gameReset != 0;
-    }
-
-    // How much of the guides is real. See DlssNrFrameInfo -- zero means the game did not say.
-    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &frame.RenderSubrectWidth);
-    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &frame.RenderSubrectHeight);
-
-    if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
-        frame.MvScaleX = 1.0f;
-
-    if (params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY) != NVSDK_NGX_Result_Success)
-        frame.MvScaleY = 1.0f;
-
-    // What the game says about its own exposure. Logged, used for nothing yet.
-    //
-    // The white point measured from the frame turned out to be a control loop rather than a
-    // measurement: the pass writes into the buffer it reads, most games adapt their exposure to the
-    // finished frame, and the two chase each other -- 0.01 to 97.9 in one Enshrouded session. Any
-    // statistic taken from a frame we modify has that problem.
-    //
-    // These do not. DLSS.Pre.Exposure is the scale the game applied before handing the buffer over,
-    // and ExposureTexture is a 1x1 the game fills with the exposure it is using; both are the game's
-    // own numbers, decided upstream of anything here. Whether either is close to the divisor the model
-    // actually wants is unknown, which is why this only prints them.
-    //
-    // The auto-exposure flag decides whether the texture means anything: with it set the game is
-    // telling DLSS to work exposure out for itself and may supply nothing. OptiScaler forces that flag
-    // on for eighteen games, so it is logged too -- reading a value whose flag has been overridden is
-    // how the debug views lied earlier tonight.
-    {
-        float preExposure = 0.0f;
-        const bool havePre =
-            params->Get(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, &preExposure) == NVSDK_NGX_Result_Success;
-
-        void* exposureTex = nullptr;
-        params->Get(NVSDK_NGX_Parameter_ExposureTexture, &exposureTex);
-
-        frame.ExposureTexture = exposureTex;
-        frame.PreExposure = havePre && preExposure > 1e-6f ? preExposure : 1.0f;
-
-        g_nr.exposureOfferedNow = exposureTex != nullptr;
-        g_nr.exposureEverOffered = g_nr.exposureEverOffered || g_nr.exposureOfferedNow;
-        g_nr.exposureFrames++;
-
-        const bool autoExposureFlag = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_AutoExposure) != 0;
-
-        struct ExposureReport
-        {
-            bool valid;
-            float pre;
-            bool havePre;
-            bool haveTexture;
-            bool autoFlag;
-        };
-
-        static ExposureReport logged {};
-        const ExposureReport now { true, havePre ? preExposure : 0.0f, havePre, exposureTex != nullptr,
-                                   autoExposureFlag };
-
-        if (!logged.valid || logged.havePre != now.havePre || logged.haveTexture != now.haveTexture ||
-            logged.autoFlag != now.autoFlag ||
-            std::abs(logged.pre - now.pre) > std::max(0.01f * std::abs(now.pre), 1e-4f))
-        {
-            logged = now;
-            LOG_INFO("DLSS-NR exposure from the game: DLSS.Pre.Exposure {}, ExposureTexture {}, "
-                     "auto-exposure flag {}",
-                     now.havePre ? std::to_string(now.pre) : std::string("not supplied"),
-                     now.haveTexture ? "supplied" : "not supplied", now.autoFlag ? "set" : "clear");
-        }
-
-        // The value itself, once it has come back off the GPU. Separate from the line above because
-        // that one says what the game offers and this one says what it actually reads -- and because
-        // the reading arrives three frames after the offer.
-        static float loggedExposure = -1.0f;
-
-        if (g_nr.gameExposure > 1e-6f &&
-            std::abs(loggedExposure - g_nr.gameExposure) > std::max(0.02f * g_nr.gameExposure, 1e-5f))
-        {
-            loggedExposure = g_nr.gameExposure;
-            LOG_INFO("DLSS-NR game exposure {:.5f} (pre-exposure {:.3f}) -> white point would be {:.2f}",
-                     g_nr.gameExposure, g_nr.gamePreExposure, g_nr.gamePreExposure / g_nr.gameExposure);
-        }
-
-        // The scan's number, on the same cadence, so one log carries both.
-        //
-        // This is the whole validation. In a game that hands over an exposure texture there is a
-        // known-correct value; if the scan's candidate tracks it, the scan found the right buffer
-        // rather than merely a moving one, and can be trusted where a game hands over nothing.
-        // Comparing two numbers after the fact needs both written down, and until now the scan's
-        // value existed only in a menu nobody can read while playing.
-        {
-            int which = 0;
-            float low = 0.0f, high = 0.0f;
-            const float scanned = DlssNr::ExposureScan::BestValue(&which, &low, &high);
-
-            static float loggedScan = -1.0f;
-
-            if (scanned > 0.0f && std::abs(loggedScan - scanned) > std::max(0.02f * scanned, 1e-6f))
-            {
-                loggedScan = scanned;
-
-                if (g_nr.gameExposure > 1e-6f)
-                    LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  the "
-                             "game's own exposure is {:.5f}  |  ratio {:.4f}",
-                             which, scanned, low, high, g_nr.gameExposure, scanned / g_nr.gameExposure);
-                else
-                    LOG_INFO("DLSS-NR exposure scan: candidate {} = {:.5f} ({:.5f}..{:.5f})  |  this "
-                             "game supplies no exposure to compare against",
-                             which, scanned, low, high);
-            }
-        }
-    }
+    ReadFrameInfo(params, frame);
 
     // The upscaler's inputs are at render resolution while colour and output are at display
     // resolution; the model takes that as a subrect per resource, which the pass reads from the
@@ -2675,6 +2853,158 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     }
 
     g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue);
+}
+
+// Ray reconstruction spells the same inputs differently, and only one set is present on any given
+// block.
+static const char* kColourKeys[] = { NVSDK_NGX_Parameter_Color, "DLSSD.Color" };
+
+// The colour the game had bound, kept for the length of the upscaler's evaluate.
+//
+// One swap can be outstanding at a time, which is all there ever is: the swap and its restore sit
+// either side of a single Evaluate. The key travels with the value because the two spellings above
+// are not interchangeable.
+static const char* g_swappedColourKey = nullptr;
+static ID3D12Resource* g_swappedColourTyped = nullptr;
+static void* g_swappedColourUntyped = nullptr;
+
+bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                           ID3D12CommandQueue* timingQueue)
+{
+    if (!Config::Instance()->DlssNrEnabled.value_or_default())
+    {
+        ReportSkipOnce("it is switched off");
+        return false;
+    }
+
+    if (!Config::Instance()->DlssNrBeforeUpscale.value_or_default())
+        return false;
+
+    if (cmdList == nullptr || params == nullptr)
+    {
+        ReportSkipOnce("no command list or no parameter block");
+        return false;
+    }
+
+    // A leftover swap means the last caller never restored. Putting it back is not enough -- the
+    // pointer it saved belongs to a frame that has gone -- but it beats writing this frame's original
+    // over it and losing the game's own colour for good.
+    if (g_swappedColourKey != nullptr)
+    {
+        LOG_WARN("DLSS-NR: the input colour was still swapped from the last evaluate");
+        params->Set(g_swappedColourKey, g_swappedColourTyped);
+        params->Set(g_swappedColourKey, g_swappedColourUntyped);
+        g_swappedColourKey = nullptr;
+    }
+
+    const char* colourKey = nullptr;
+    ID3D12Resource* colour = nullptr;
+
+    for (const char* key : kColourKeys)
+    {
+        colour = GetResource(params, key, key);
+
+        if (colour != nullptr)
+        {
+            colourKey = key;
+            break;
+        }
+    }
+
+    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
+    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
+
+    if (colour == nullptr || depth == nullptr || motion == nullptr)
+    {
+        ReportSkipOnce(colour == nullptr  ? "the parameters carried no input colour"
+                       : depth == nullptr ? "the parameters carried no depth"
+                                          : "the parameters carried no motion vectors");
+        return false;
+    }
+
+    DlssNrFrameInfo frame {};
+    ReadFrameInfo(params, frame);
+
+    ID3D12Device* device = nullptr;
+
+    if (FAILED(colour->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+    {
+        ReportSkipOnce("the input colour belongs to no D3D12 device");
+        return false;
+    }
+
+    if (g_compose == nullptr)
+        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
+
+    device->Release();
+
+    if (g_compose == nullptr)
+    {
+        ReportSkipOnce("the pass could not be created");
+        return false;
+    }
+
+    // The render rect, which is what the upscaler is about to read -- not necessarily the whole
+    // texture, since a game with dynamic resolution keeps one colour buffer sized for the largest
+    // picture it will ever render and draws into the corner of it. The same reasoning the pass already
+    // applies to the guides, asked of the colour.
+    unsigned int renderWidth = 0;
+    unsigned int renderHeight = 0;
+    params->Get(NVSDK_NGX_Parameter_Width, &renderWidth);
+    params->Get(NVSDK_NGX_Parameter_Height, &renderHeight);
+
+    const D3D12_RESOURCE_DESC desc = colour->GetDesc();
+
+    if (renderWidth == 0 || renderHeight == 0 || renderWidth > desc.Width || renderHeight > desc.Height)
+    {
+        renderWidth = (unsigned int) desc.Width;
+        renderHeight = desc.Height;
+    }
+
+    ID3D12Resource* edit = g_compose->AcquireInputEdit(cmdList, colour, renderWidth, renderHeight);
+
+    if (edit == nullptr)
+        return false;
+
+    // Colour and output are different resources here, which is the whole difference between the two
+    // placements; the pass reads one and writes the other and is otherwise the same pass.
+    if (!g_compose->Dispatch(cmdList, colour, depth, motion, edit, frame, timingQueue))
+        return false;
+
+    // The upscaler reads its colour out of the parameter block, so the block is where the swap goes.
+    g_swappedColourKey = colourKey;
+    g_swappedColourTyped = nullptr;
+    g_swappedColourUntyped = nullptr;
+    params->Get(colourKey, &g_swappedColourTyped);
+    params->Get(colourKey, &g_swappedColourUntyped);
+
+    // Both spellings. A real NGX block keeps them in separate slots and every consumer in this tree
+    // reads the typed one first and falls back to the untyped one, so writing only one of them would
+    // leave whichever it reads first pointing at the game's original -- and OptiScaler hands the game
+    // a real block whenever DLSS is enabled. On OptiScaler's own block the two are one slot, and this
+    // is simply the same write twice.
+    params->Set(colourKey, edit);
+    params->Set(colourKey, (void*) edit);
+
+    return true;
+}
+
+void RestoreInputColour(NVSDK_NGX_Parameter* params)
+{
+    if (g_swappedColourKey == nullptr)
+        return;
+
+    const char* key = g_swappedColourKey;
+    g_swappedColourKey = nullptr;
+
+    if (params == nullptr)
+        return;
+
+    params->Set(key, g_swappedColourTyped);
+    params->Set(key, g_swappedColourUntyped);
+
+    g_swappedColourTyped = nullptr;
+    g_swappedColourUntyped = nullptr;
 }
 
 // The pass. Resources in, nothing read from anywhere the caller cannot see.
@@ -2894,6 +3224,21 @@ void Shutdown()
         g_nr.colorSmall->Release();
         g_nr.colorSmall = nullptr;
     }
+
+    if (g_nr.inputEdit != nullptr)
+    {
+        g_nr.inputEdit->Release();
+        g_nr.inputEdit = nullptr;
+        g_nr.inputEditWidth = 0;
+        g_nr.inputEditHeight = 0;
+        g_nr.inputEditFormat = DXGI_FORMAT_UNKNOWN;
+        g_nr.inputEditState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
+
+    // Whatever was bound is gone with the device; the saved pointer must not outlive it.
+    g_swappedColourKey = nullptr;
+    g_swappedColourTyped = nullptr;
+    g_swappedColourUntyped = nullptr;
 
     if (g_nr.superUp != nullptr)
     {

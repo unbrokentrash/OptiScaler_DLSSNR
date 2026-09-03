@@ -1060,6 +1060,18 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
     UpscalerInputsDx12::UpscaleStart(InCmdList, InParameters, feature);
     FSR3FG::SetUpscalerInputs(InCmdList, InParameters, feature);
 
+    // Neural Rendering, on the frame the upscaler is about to read rather than the one it writes.
+    //
+    // The model works at render resolution here -- 1707x960 for a 1440p monitor on Quality -- which is
+    // where its cost comes from, and the upscaler then carries its detail through its own accumulation.
+    // The parameter block is left pointing at the edited copy for exactly this evaluate; the restore
+    // below is not optional, because the block is the game's and outlives this call.
+    bool nrSwapped = false;
+    {
+        ScopedSkipHeapCapture skipHeapCapture {};
+        nrSwapped = DlssNr::EvaluateBeforeUpscale(InCmdList, InParameters);
+    }
+
     // Evaluate the feature
     bool evalSuccess = false;
     {
@@ -1069,6 +1081,9 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
         ScopedSkipHeapCapture skip {};
         evalSuccess = feature->Evaluate(InCmdList, InParameters);
     }
+
+    if (nrSwapped)
+        DlssNr::RestoreInputColour(InParameters);
 
     if (!evalSuccess)
     {
@@ -1157,9 +1172,24 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
         {
             LOG_DEBUG("Passthrough to native DLSS EvaluateFeature for handle {}", handleId);
 
+            // Neural Rendering before the upscale, for native DLSS as well: the model is shown the
+            // frame DLSS is about to consume and the block is pointed at the edited copy for the
+            // length of the evaluate. The feature check is the same one the pass after the upscale
+            // makes -- frame generation is handed depth and motion vectors too.
+            bool nrSwapped = false;
+
+            if (feature != NVSDK_NGX_Feature_FrameGeneration)
+            {
+                ScopedSkipHeapCapture skipHeapCapture {};
+                nrSwapped = DlssNr::EvaluateBeforeUpscale(InCmdList, InParameters);
+            }
+
             NVSDK_NGX_Result result =
                 NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
             LOG_DEBUG("Native DLSS EvaluateFeature result: 0x{:X}", (uint32_t) result);
+
+            if (nrSwapped)
+                DlssNr::RestoreInputColour(InParameters);
 
             // Neural Rendering runs over what the upscaler just wrote, on the same list, so frame
             // generation interpolates from enhanced frames and the model still costs one run per

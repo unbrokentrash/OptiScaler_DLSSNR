@@ -81,9 +81,22 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // Sizes come from the resources. Everything the pass cannot work out for itself is in
     // DlssNrFrameInfo; everything the user chose stays in Config. colour and output may be the same
     // resource. timingQueue is the queue this list will be executed on, when the caller knows it.
-    void Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
+    // Returns true only when the composed frame really was written to output. A frame it declined --
+    // the one the feature is created on, a missing guide, a failure -- leaves output untouched, which
+    // is what a caller placing this before the upscaler needs to know before handing that texture on.
+    bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
                   ID3D12CommandQueue* timingQueue = nullptr);
+
+    // The texture the upscaler is handed in place of the game's colour, when the pass runs before the
+    // upscale rather than after it.
+    //
+    // Ensured here rather than by the caller because it is module state living under this object's own
+    // lock: sized to the render rect, formatted like the game's own buffer, and left resting in
+    // whatever state a colour buffer is in for this game so the upscaler's transitions of it are
+    // valid. Null when it could not be made, in which case there is nothing to run before the upscale.
+    ID3D12Resource* AcquireInputEdit(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour,
+                                     unsigned int width, unsigned int height);
 
     // Records one pass. Resources that a given mode does not read may be null; a stand-in is bound in
     // their place so every descriptor in the table is valid.

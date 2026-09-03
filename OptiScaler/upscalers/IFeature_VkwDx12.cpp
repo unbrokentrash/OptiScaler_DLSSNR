@@ -2155,8 +2155,22 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
         if (!Config::Instance()->DisableReactiveMask.value_or(false) && vkReactive.Dx12Resource != nullptr)
             InParameters->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) vkReactive.Dx12Resource);
 
+        // Neural Rendering before the upscale, on the D3D12 copy of the game's colour. The block
+        // above has just been pointed at that copy, so the pass reads exactly what the upscaler is
+        // about to read, at render resolution, and hands it back an edited one in its place.
+        bool nrSwapped = false;
+
+        if (Config::Instance()->DlssNrEnabled.value_or_default())
+        {
+            ScopedSkipHeapCapture skipHeapCapture {};
+            nrSwapped = DlssNr::EvaluateBeforeUpscale(cmdList, InParameters, Dx12CommandQueue);
+        }
+
         LOG_DEBUG("Dispatch!!");
         dx12EvalResult = dx12Feature->Evaluate(cmdList, InParameters);
+
+        if (nrSwapped)
+            DlssNr::RestoreInputColour(InParameters);
 
         // The parameter block still holds the D3D12 resources written above -- the Vulkan handles are
         // not put back until after this -- so the pass reads exactly what the upscaler just wrote.

@@ -104,6 +104,23 @@ void RenderMenu(Config* config, float menuResScale)
         // unless told. Dimmed, because it is a note rather than a setting.
         ImGui::TextDisabled("Can be toggled with a key -- bind it under Keybinds, \"Neural Rendering\".");
 
+        // Which side of the upscaler the model runs on. Structural rather than a tuning value, so it
+        // sits with the enable rather than under Cost -- though cost is most of what it decides.
+        bool beforeUpscale = config->DlssNrBeforeUpscale.value_or_default();
+        if (ImGui::Checkbox("Run before the upscaler", &beforeUpscale))
+            config->DlssNrBeforeUpscale = beforeUpscale;
+
+        HelpMarker("Runs the model on the frame the upscaler is about to read, at render resolution,"
+                       "\ninstead of on the finished frame at display resolution."
+                       "\n\nOn a 1440p monitor at Quality that is 1707x960 rather than 2560x1440 -- 44% of"
+                       "\nthe pixels, and the model's cost falls with them. The upscaler then carries the"
+                       "\ndetail through its own accumulation rather than the model landing on top of it."
+                       "\n\nWhat it gives up: the model is shown a jittered, aliased frame rather than a"
+                       "\nresolved one, and the upscaler is free to reject some of what it synthesised."
+                       "\nNVIDIA runs it on the finished frame, which is what turning this off does."
+                       "\n\nDirect3D 12 only -- a game on the native Vulkan path runs after the upscale"
+                       "\nwhatever this says. Changing it rebuilds the model, so the picture pauses.");
+
         bool applyModel = config->DlssNrApplyModel.value_or_default();
         if (ImGui::Checkbox("Apply the model", &applyModel))
             config->DlssNrApplyModel = applyModel;
