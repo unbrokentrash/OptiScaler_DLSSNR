@@ -733,7 +733,11 @@ class AbCapture
                             "channel, PQ encoded, BT.2020, marked HDR10 with a cICP chunk, with paper\n"
                             "white placed at the 203 nits BT.2408 specifies. Windows Photos, Chrome and\n"
                             "Edge display them as real HDR. These are display-referred rather than the\n"
-                            "frame's own numbers, so look at these and measure from the .exr.\n");
+                            "frame's own numbers, so look at these and measure from the .exr.\n"
+                            "\nPQ stops at 10000 nits, which at 203 nits of paper white is 49x it, so a\n"
+                            "pixel brighter than that clips here. Real frames do reach it -- the sun, a\n"
+                            "muzzle flash -- and the .exr does not clip, which is the other reason it is\n"
+                            "the one to measure from.\n");
 
         if (!handoff_.valid)
         {
