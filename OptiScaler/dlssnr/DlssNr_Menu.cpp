@@ -374,10 +374,7 @@ void RenderMenu(Config* config, float menuResScale)
                                 "is sampled back down. Experimental, and costly -- time grows with the area.",
                                 scalePercent / 100.0f);
 
-        // Shown whenever the model is not at 100%, not only above it. It used to appear only when
-        // supersampling, because only the down-leg existed; the reduction up-leg reads the same setting
-        // and a control you cannot see is a control you cannot use.
-        if (scalePercent != 100)
+        if (scalePercent > 100)
         {
             static const char* dsNames[] = { "FSR1", "Bicubic", "Catmull-Rom", "Lanczos2",
                                              "Lanczos3", "Kaiser2", "Kaiser3", "MAGIC" };
@@ -388,19 +385,11 @@ void RenderMenu(Config* config, float menuResScale)
             if (ImGui::Combo("Downscaler (NR)", &ds, dsNames, IM_ARRAYSIZE(dsNames)))
                 config->DlssNrScalingDownscaler = (Scaler) ds;
 
-            HelpMarker("The filter that resamples the model's answer to the frame's size, in whichever"
-                           "\ndirection it has to go."
-                           "\n\nAbove 100% it averages a super-native answer back down, which is what turns"
-                           "\nsupersampling into LESS noise rather than more. Sharper filters (Lanczos3,"
-                           "\nKaiser3) keep the most detail; softer ones (Bicubic, Catmull-Rom) are"
-                           "\ngentler on ringing."
-                           "\n\nBelow 100% it ENLARGES a reduced answer to frame size before the"
-                           "\ncomposition, which the composition used to do itself with a single bilinear"
-                           "\ntap -- the blur, and the shimmer, at every setting under 100%. Going up the"
-                           "\nchoice is coarser: FSR1 gives the edge-adaptive upscaler, everything else"
-                           "\ngives bicubic, so FSR1 is the one worth trying here."
-                           "\n\nIndependent of the Output Scaling downscaler, so the two can differ and"
-                           "\nrun at the same time.");
+            HelpMarker("The filter that averages the model's above-native answer back to display size --"
+                           "\nthis is what turns supersampling into LESS noise rather than more. Sharper"
+                           "\nfilters (Lanczos3, Kaiser3) keep the most detail; softer ones (Bicubic,"
+                           "\nCatmull-Rom) are gentler on ringing. Independent of the Output Scaling"
+                           "\ndownscaler, so the two can differ and run at the same time.");
         }
 
         HelpMarker("What fraction of the frame the model works at. Cost falls with the square of"
