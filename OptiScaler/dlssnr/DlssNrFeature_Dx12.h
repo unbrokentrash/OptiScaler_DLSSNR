@@ -2,6 +2,8 @@
 
 #include <d3d12.h>
 
+#include <functional>
+
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
 
@@ -51,6 +53,21 @@ bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
 // Puts the game's own colour back in the parameter block. Harmless when nothing was swapped, so it can
 // be called on any path out of an evaluate.
 void RestoreInputColour(NVSDK_NGX_Parameter* params);
+
+// Whether this frame's upscaler evaluate should be run through EvaluateMatchedPair instead of called
+// directly. True only on the one frame of an A/B capture that is taking a matched finished pair, and
+// only when EvaluateBeforeUpscale actually swapped the colour -- so a caller can ask on every frame.
+bool WantMatchedPair();
+
+// Runs the caller's evaluate TWICE on this one frame -- once with the game's own colour and once with
+// the pass's edited copy -- and photographs the output after each, so the capture's finished pair is
+// one frame rather than two consecutive ones. Both evaluates are reset, so neither carries history and
+// the two differ by the edit alone; the game wears one reset frame for it.
+//
+// Returns the result of the second evaluate, which is the one whose output the game keeps. Call it in
+// place of the evaluate, passing the same call as the callback, and only when WantMatchedPair says so.
+NVSDK_NGX_Result EvaluateMatchedPair(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                                     const std::function<NVSDK_NGX_Result()>& evaluate);
 
 
 

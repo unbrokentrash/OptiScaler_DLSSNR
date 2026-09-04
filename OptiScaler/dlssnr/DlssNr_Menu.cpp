@@ -211,9 +211,9 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n  4_seam_after.png  what it produced -- the SAME frame as 3, exactly"
                        "\n\n3 and 4 are one frame copied either side of the pass, so nothing between"
                        "\nthem differs but the model: that is the pair that says whether the pass is"
-                       "\nimplemented correctly. 1 and 2 are consecutive frames and say what it looks"
-                       "\nlike -- running before the upscale, the finished frame does not exist yet"
-                       "\nwhen the pass runs, so those two cannot be the same frame."
+                       "\nimplemented correctly. 1 and 2 are the finished frame and say what it looks"
+                       "\nlike -- one frame as well when \"One frame, both ways\" is on, otherwise two"
+                       "\nconsecutive ones."
                        "\n\nThe held-back frame is bit-identical to Neural Rendering being off, not an"
                        "\napproximation of it."
                        "\n\nEach state is held long enough for the upscaler's history to be entirely"
@@ -223,6 +223,65 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nupscaler's blend weight rather than the pass. Bind a key for it under"
                        "\nKeybinds, or drop a file named dlssnr-ab.trigger beside OptiScaler, so"
                        "\nreaching for this button does not move the scene.");
+
+        {
+            const bool before = config->DlssNrBeforeUpscale.value_or_default();
+            ImGui::BeginDisabled(!before);
+
+            bool matched = config->DlssNrAbCaptureMatched.value_or_default();
+            if (ImGui::Checkbox("One frame, both ways", &matched))
+                config->DlssNrAbCaptureMatched = matched;
+
+            ImGui::EndDisabled();
+        }
+
+        HelpMarker("Takes the finished pair from ONE frame instead of two consecutive ones."
+                       "\n\nRunning before the upscale, what this pass writes is an upscaler input -- so"
+                       "\nthe same frame can be sent through the upscaler twice, once with the game's own"
+                       "\ncolour and once with the edited copy, and photographed after each. Nothing"
+                       "\nbetween the two differs but the edit: same geometry, same jitter, and no camera"
+                       "\nmovement is possible because there is no second frame to move in."
+                       "\n\nBoth evaluates are RESET, because otherwise the second would see history the"
+                       "\nfirst had just written and the pair would be asymmetric in the way it exists to"
+                       "\navoid. So the two are single-frame resolves: exactly matched, but rawer than"
+                       "\nplay looks, and the game wears one reset frame while the shot is taken."
+                       "\n\nOff falls back to two consecutive frames, each settled -- which is what a"
+                       "\nplayer actually sees, at the cost of one frame of the game between them."
+                       "\n\nAfter the upscale this is unavailable and unnecessary: the seam pair is"
+                       "\nalready the same frame at display resolution there.");
+
+        {
+            static const char* hdrNames[] = { "Off (sRGB PNG only)", "HDR PNG (16-bit, PQ)",
+                                              "OpenEXR (scene linear)", "Both" };
+            int hdrKind = (int) config->DlssNrCaptureHdr.value_or_default();
+
+            if (hdrKind < 0 || hdrKind >= IM_ARRAYSIZE(hdrNames))
+                hdrKind = 1;
+
+            ImGui::PushItemWidth(220.0f * menuResScale);
+
+            if (ImGui::Combo("Also write HDR", &hdrKind, hdrNames, IM_ARRAYSIZE(hdrNames)))
+                config->DlssNrCaptureHdr = (uint32_t) hdrKind;
+
+            ImGui::PopItemWidth();
+        }
+
+        HelpMarker("The sRGB PNGs are always written, and they throw most of an HDR capture away: the"
+                       "\nframe is divided by paper white, sRGB encoded into eight bits, and saturated"
+                       "\nat 1. Everything above paper white -- a sky, a specular hit, a light source,"
+                       "\nwhich is where a colour argument usually lives -- comes out flat white in all"
+                       "\nfour images at once, so it cannot be compared there at all. This adds files"
+                       "\nthat keep it."
+                       "\n\nHDR PNG is the one to LOOK at: 16 bits a channel, PQ, BT.2020, marked HDR10"
+                       "\nwith a cICP chunk and paper white at the 203 nits BT.2408 gives it. Windows"
+                       "\nPhotos, Chrome and Edge show it as real HDR on an HDR display."
+                       "\n\nOpenEXR is the one to MEASURE from: half float, and the buffer's own"
+                       "\nscene-linear values with nothing done to them -- not divided, not curved, not"
+                       "\nclipped. Photoshop, Affinity, GIMP, Krita, DaVinci and ImageMagick read it;"
+                       "\nWindows Photos does not."
+                       "\n\nNot JPEG XL: a conformant encoder is libjxl plus brotli and highway, and"
+                       "\nnothing of that shape is vendored here. These two carry the same range"
+                       "\nlosslessly, so only the container differs.");
 
         bool applyModel = config->DlssNrApplyModel.value_or_default();
         if (ImGui::Checkbox("Apply the model", &applyModel))

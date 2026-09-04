@@ -337,6 +337,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
+            DlssNrAbCaptureMatched.set_from_config(readBool("DlssNr", "AbCaptureMatched"));
+            DlssNrCaptureHdr.set_from_config(readUInt("DlssNr", "CaptureHdr"));
             DlssNrCompLuma.set_from_config(readFloat("DlssNr", "CompLuma"));
             DlssNrCompChroma.set_from_config(readFloat("DlssNr", "CompChroma"));
 
@@ -1241,6 +1243,9 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "TagScale",
                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WorkingScale", GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AbCaptureMatched",
+                 GetBoolValue(Instance()->DlssNrAbCaptureMatched.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CaptureHdr", GetIntValue(Instance()->DlssNrCaptureHdr.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CompLuma", GetFloatValue(Instance()->DlssNrCompLuma.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CompChroma", GetFloatValue(Instance()->DlssNrCompChroma.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
