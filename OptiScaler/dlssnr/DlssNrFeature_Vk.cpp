@@ -610,9 +610,9 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     // The model's working size. The slider is a fraction of the frame; at 1 it is the frame, and the
     // reduced path below never runs, so the default is byte-for-byte what it was.
-    // Above 1 the model supersamples (up to 2x): the proxy is enlarged, the model runs above native,
+    // Above 1 the model supersamples (up to 3x): the proxy is enlarged, the model runs above native,
     // and superDown averages the answer back. Vulkan matches the D3D12 cap.
-    const float workScale = std::clamp(cfg.DlssNrWorkingScale.value_or_default(), 0.25f, 2.0f);
+    const float workScale = std::clamp(cfg.DlssNrWorkingScale.value_or_default(), 0.25f, 3.0f);
     const uint32_t workWidth = (uint32_t) (width * workScale + 0.5f);
     const uint32_t workHeight = (uint32_t) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
