@@ -174,6 +174,9 @@ void RenderMenu(Config* config, float menuResScale)
         }
 
         HelpMarker("Scales the model's edit up before the upscaler downstream discards part of it."
+                       "\n\nOFF by default (1.00 in both), and an experiment rather than a fix: a gain"
+                       "\ncan ask an upscaler for more of an edit, it cannot make it carry what it"
+                       "\ndeclined to, and asking too hard clips."
                        "\n\nRunning before the upscale, what this pass writes is an upscaler input rather"
                        "\nthan the finished frame, so its edit has to survive a temporal resolve before"
                        "\nanyone sees it -- and it does not survive whole. Measured on a matched A/B"

@@ -1037,21 +1037,49 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (gColourStrength > 1.0)
         result = ClampAp1(FromOkLab(float3(1.0, gColourStrength, gColourStrength) * ToOkLab(max(result, 0.0))));
 
-    // Put back what the upscaler downstream is going to take. Identity at the after-upscale placement,
-    // where there is no upscaler left to cross and both gains are set to 1.
+    // Put back some of what the upscaler downstream is going to take. Identity at the after-upscale
+    // placement, and identity at its default, which is off.
+    //
+    // This was written as `original + editLuma * gl + (edit - editLuma) * gc` -- the edit split into
+    // luminance and chroma, each scaled, added back -- placed here, after the guard and after the
+    // gamut clamp. Every warning in the fifty lines above applies to that and it earned all of them:
+    // scaling an RGB difference spreads the channels apart faster than luminance moves, so on a lit
+    // face the smallest channel crosses zero and the face turns green; and a darkening edit scaled by
+    // the luminance gain drives through zero and clamps, so shadows fill in as flat black blobs. Both
+    // were reported, both are exactly what that arithmetic does, and neither could be caught by the
+    // machinery above because it had already run.
+    //
+    // Rewritten in the two forms this file had already worked out for its own controls. Luminance
+    // moves as an exponent on the ratio, which is what detail strength past 1 does: one to any power
+    // is one, so an untouched pixel stays untouched, it cannot cross zero, and the result is still a
+    // ratio so the guard binds it. Colour moves as an extrapolation of chroma in OkLab with the gamut
+    // clamp, which is what colour strength past 1 does: out-of-gamut rolls off by desaturating toward
+    // neutral rather than by clipping a channel, so a hue cannot invert.
+    //
+    // It is still only a gain, and a gain cannot restore what an upscaler declined to carry -- it can
+    // only ask for more of it and be refused harder. Off by default for that reason as much as for
+    // the damage.
     {
         const float gl = CompGain(gCompLuma);
         const float gc = CompGain(gCompChroma);
 
-        if (gl != 1.0 || gc != 1.0)
+        if (gl != 1.0)
         {
-            const float3 edit = result - original;
-            const float editLuma = dot(edit, kLuma);
+            const float composedLuma = dot(result, kLuma);
+            const float ratio = (composedLuma + kRatioFloor) / (originalLuma + kRatioFloor);
+            const float wanted = clamp(pow(max(ratio, 1e-6), gl), 1.0 / guard, guard);
 
-            // Split rather than scaled whole, because the two halves are not discarded alike: scaling
-            // the edit by the colour gain would brighten it by the same factor, which is a different
-            // picture and not the one the pass composed.
-            result = original + editLuma * gl + (edit - editLuma) * gc;
+            result *= wanted / max(ratio, 1e-6);
+        }
+
+        if (gc != 1.0)
+        {
+            const float3 lab = ToOkLab(max(result, 0.0));
+            const float3 base = ToOkLab(max(original, 0.0));
+
+            // Chroma only: L is taken from the composed picture untouched, so this cannot undo the
+            // luminance the block above just set.
+            result = ClampAp1(FromOkLab(float3(lab.x, base.yz + (lab.yz - base.yz) * gc)));
         }
     }
 

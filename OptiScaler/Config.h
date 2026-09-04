@@ -399,12 +399,16 @@ class Config
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
 
     // What the model's edit is scaled by before the upscaler downstream discards part of it. Applied
-    // only when the pass runs before the upscale, where its output is an upscaler input rather than the
-    // finished frame. The defaults are the measured inverses of what one A/B capture said survives --
-    // 83% of the luminance and 48% of the colour -- so 1.0 in both turns the compensation off and is
-    // how to check it.
-    CustomOptional<float> DlssNrCompLuma { 1.2f };
-    CustomOptional<float> DlssNrCompChroma { 2.05f };
+    // only when the pass runs before the upscale, where its output is an upscaler input rather than
+    // the finished frame.
+    //
+    // Off by default. It was shipped on, at the measured inverses of what one A/B capture said
+    // survives, and that was wrong twice over: the arithmetic clipped (green faces, shadows filling in
+    // as black) and, once that was fixed, the idea underneath is still only a gain -- it can ask an
+    // upscaler for more of an edit, not make it carry what it declined to. Left here because asking
+    // is cheap and the answer is worth having per game, but the shipped picture is the composed one.
+    CustomOptional<float> DlssNrCompLuma { 1.0f };
+    CustomOptional<float> DlssNrCompChroma { 1.0f };
 
     // Filter used for NR supersampling (working scale > 1): the model runs above native, and this is
     // the downscaler that averages its answer back to native. Independent of OutputScalingDownscaler
