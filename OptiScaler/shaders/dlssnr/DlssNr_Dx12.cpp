@@ -209,6 +209,15 @@ struct NrState
     bool builtScaled = false;
     unsigned int builtInWidth = 0;
     unsigned int builtInHeight = 0;
+
+    // What was ASKED for when it was built, which is not the same thing and has to be tracked
+    // separately. Comparing the setting against the outcome means a model that refuses to upscale
+    // reads as "needs rebuilding" on every single frame -- and the README says what rebuilding every
+    // frame costs: the driver's latches are exhausted and the feature stops responding until the
+    // process restarts. So the rebuild trigger compares against the request, and the refusal is
+    // remembered rather than retried.
+    bool builtScaledWanted = false;
+    bool scaledRefused = false;
     PFN_NrEvaluate evaluate = nullptr;
     PFN_NrRelease release = nullptr;
     PFN_NrSetExtras setExtras = nullptr;
@@ -2136,7 +2145,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
                                    g_nr.workWidth != workWidth || g_nr.workHeight != workHeight ||
-                                   g_nr.builtScaled != modelUpscale;
+                                   g_nr.builtScaledWanted != modelUpscale;
 
     // The model reads its tuning once, while the feature is built, so a changed setting only takes
     // effect when the feature is rebuilt. TuningMatchesFeature was written to notice that and then
@@ -2195,6 +2204,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.accum[0]);
             ParkNrResource(g_nr.accum[1]);
             g_nr.accumValid = false;
+            g_nr.scaledRefused = false;
         }
     }
 
@@ -2292,8 +2302,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         //
         // Built with the input at the working size and the output at the frame's, so the answer comes
         // back already the right size and nothing downstream enlarges it.
-        const bool wantScaled = modelUpscale;
+        // Not retried once refused: the answer will not change between frames, and asking again every
+        // rebuild would put a failed create in front of every successful one.
+        const bool wantScaled = modelUpscale && !g_nr.scaledRefused;
 
+        g_nr.builtScaledWanted = modelUpscale;
         g_nr.builtScaled = false;
         g_nr.builtInWidth = workWidth;
         g_nr.builtInHeight = workHeight;
@@ -2318,8 +2331,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
             else
             {
+                g_nr.scaledRefused = true;
                 LOG_WARN("DLSS-NR: the model refused to be built as an upscaler ({}x{} -> {}x{}), "
-                         "falling back to same-size", workWidth, workHeight, width, height);
+                         "falling back to same-size (create 0x{:X})", workWidth, workHeight, width,
+                         height, (unsigned int) (g_nr.lastCreate != nullptr ? *g_nr.lastCreate : 0));
             }
         }
 
@@ -3672,6 +3687,8 @@ NrSizes Sizes()
     s.frameHeight = g_nr.height;
     s.modelWidth = g_nr.workWidth;
     s.modelHeight = g_nr.workHeight;
+    s.upscaling = g_nr.builtScaled;
+    s.upscalingRefused = g_nr.scaledRefused;
     return s;
 }
 

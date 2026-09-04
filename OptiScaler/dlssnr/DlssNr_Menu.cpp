@@ -458,8 +458,21 @@ void RenderMenu(Config* config, float menuResScale)
             const auto sizes = DlssNr::Sizes();
 
             if (sizes.modelWidth != 0 && sizes.frameWidth != 0)
-                ImGui::TextDisabled("The model is working at %ux%u, on a %ux%u frame.", sizes.modelWidth,
-                                    sizes.modelHeight, sizes.frameWidth, sizes.frameHeight);
+            {
+                if (sizes.upscaling)
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                       "The model is UPSCALING: %ux%u in -> %ux%u out.", sizes.modelWidth,
+                                       sizes.modelHeight, sizes.frameWidth, sizes.frameHeight);
+                else if (sizes.upscalingRefused)
+                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f),
+                                       "The model REFUSED to upscale. Running at %ux%u on a %ux%u frame.",
+                                       sizes.modelWidth, sizes.modelHeight, sizes.frameWidth,
+                                       sizes.frameHeight);
+                else
+                    ImGui::TextDisabled("The model is working at %ux%u, on a %ux%u frame.",
+                                        sizes.modelWidth, sizes.modelHeight, sizes.frameWidth,
+                                        sizes.frameHeight);
+            }
         }
 
         if (scalePercent > 100)

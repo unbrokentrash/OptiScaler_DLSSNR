@@ -116,6 +116,11 @@ struct NrSizes
 {
     unsigned int frameWidth = 0, frameHeight = 0;
     unsigned int modelWidth = 0, modelHeight = 0;
+
+    // Whether the live feature is actually upscaling, and whether the model turned the request down.
+    // Reported so the answer to "did that toggle do anything" is on screen rather than in a log file.
+    bool upscaling = false;
+    bool upscalingRefused = false;
 };
 
 NrSizes Sizes();
