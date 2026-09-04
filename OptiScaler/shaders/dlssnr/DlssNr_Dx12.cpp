@@ -2657,8 +2657,16 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // reported as bad. Half-length vectors and doubled vectors both look like smearing during motion,
     // so the symptom does not distinguish them either.
     //
-    // Rather than guess, it is a switch, defaulting to what shipped. Mode 0 hands over the game's value
-    // untouched, which is right if the model does its own rescaling.
+    // The reference implementation settles it, and against the factor. NVIDIA's own ReShade addon runs
+    // the model on the UPSCALED colour with the game's live depth and motion vectors -- render
+    // resolution, untouched. So on a 50% scale it routinely hands the model a colour raster twice the
+    // size of its vectors and nothing goes wrong, which it can only manage by rescaling from the MVec
+    // subrect to its own raster itself. A caller applying that ratio as well is applying it twice.
+    //
+    // So mode 0, the game's value passed through, is the default, and it agrees with what the comment
+    // beside the stored value has said all along. Kept as a switch rather than deleted because this is
+    // an inference from how the reference is built, not a measurement, and one toggle undoes it. At
+    // 100% the two modes are identical, which is why this was invisible until the slider moved.
     const float mvRatio = width != 0 ? (float) workWidth / (float) width : 1.0f;
     const float mvToWork = cfg.DlssNrMvScaleMode.value_or_default() == 0 ? 1.0f : mvRatio;
 

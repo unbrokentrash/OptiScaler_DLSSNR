@@ -408,12 +408,16 @@ class Config
     // upscaler for more of an edit, not make it carry what it declined to. Left here because asking
     // is cheap and the answer is worth having per game, but the shipped picture is the composed one.
     // Which convention the model's motion-vector scale is handed over in when the model is NOT at
-    // 100%: 0 the game's own value untouched, 1 that value times workWidth/width (the shipped
-    // behaviour). At 100% the two are identical and this setting does nothing.
+    // 100%: 0 the game's own value untouched, 1 that value times workWidth/width. At 100% the two are
+    // identical and this setting does nothing at all.
     //
-    // Two conventions because the code contains both assumptions and neither has been verified
-    // against the model. See the comment at the point of use.
-    CustomOptional<uint32_t> DlssNrMvScaleMode { 1 };
+    // Defaults to 0 on the reference implementation's evidence. NVIDIA's own ReShade addon runs the
+    // model on the UPSCALED colour with the game's live render-resolution depth and motion vectors and
+    // does nothing to them -- so the model is routinely handed a colour raster twice the size of its
+    // vectors and copes, which it can only do by rescaling from the MVec subrect itself. A factor
+    // applied by the caller on top of that is counted twice, which is what the comment where this
+    // value is stored has said all along.
+    CustomOptional<uint32_t> DlssNrMvScaleMode { 0 };
 
     CustomOptional<float> DlssNrCompLuma { 1.0f };
     CustomOptional<float> DlssNrCompChroma { 1.0f };

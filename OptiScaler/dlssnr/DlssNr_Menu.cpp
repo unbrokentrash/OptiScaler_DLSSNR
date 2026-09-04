@@ -174,7 +174,7 @@ void RenderMenu(Config* config, float menuResScale)
         }
 
         {
-            static const char* mvNames[] = { "As the game gave it", "Times model / frame (shipped)" };
+            static const char* mvNames[] = { "As the game gave it (default)", "Times model / frame" };
             int mvMode = (int) config->DlssNrMvScaleMode.value_or_default();
 
             if (mvMode < 0 || mvMode >= IM_ARRAYSIZE(mvNames))
@@ -193,14 +193,16 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nevery other setting."
                        "\n\nThe game's own scale is always read and passed through; this is only about"
                        "\nwhat is applied ON TOP when the model works at a different size from the frame."
-                       "\n\nThe code contains both answers and neither has been verified against the"
-                       "\nmodel. If the model rescales the vectors from their subrect to its own raster"
-                       "\nitself, the shipped factor is applied twice and the vectors come out wrong;"
-                       "\nif it does not, the factor is the only thing making them the right length."
-                       "\n\nBoth failures look the same from outside -- smearing and ghosting during"
-                       "\nmotion -- so this is a switch rather than a guess. Try both while moving the"
-                       "\ncamera with the model below 100% and keep whichever tracks properly. The A/B"
-                       "\ncapture writes down the game's value and the handed-over one separately.");
+                       "\n\nNVIDIA's own ReShade addon runs the model on the UPSCALED colour with the"
+                       "\ngame's live render-resolution depth and vectors, untouched -- so the model is"
+                       "\nroutinely handed a colour raster twice the size of its vectors and copes,"
+                       "\nwhich it can only do by rescaling from the vector subrect itself. A factor"
+                       "\napplied on top of that is applied twice. Hence the default."
+                       "\n\nStill a switch, because that is an inference from how the reference is built"
+                       "\nrather than a measurement here. Both failures look the same from outside --"
+                       "\nsmearing and ghosting during motion -- so try both while moving the camera"
+                       "\nwith the model below 100% and keep whichever tracks. The A/B capture writes"
+                       "\ndown the game's value and the handed-over one separately.");
 
         HelpMarker("Scales the model's edit up before the upscaler downstream discards part of it."
                        "\n\nOFF by default (1.00 in both), and an experiment rather than a fix: a gain"
