@@ -98,6 +98,10 @@ jobs:
     - name: Recompile the Neural Rendering shader
       shell: pwsh
       working-directory: OptiScaler/shaders/dlssnr/precompile
+      env:
+        # For the release lookup below. Anonymous API calls are rate limited per runner IP address,
+        # which is shared, so a build could fail for having been unlucky about who else was building.
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         $candidates = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse `
                         -Filter dxc.exe -ErrorAction SilentlyContinue |
@@ -112,7 +116,33 @@ jobs:
         & $dxc -T cs_6_0 -E CSMain -Fo DlssNr_Shader.cso dlssnr.hlsl
         if ($LASTEXITCODE -ne 0) { throw "the D3D12 compile failed" }
 
-        & $dxc -T cs_6_0 -E CSMain -D VK_MODE=1 -spirv -Fo DlssNr_Shader_Vk.spv dlssnr.hlsl
+        # A second compiler for the Vulkan leg, because the Windows SDK's is built without one.
+        #
+        # dxc has two back ends and the SDK ships only DXIL: asked for SPIR-V it answers "SPIR-V
+        # CodeGen not available. Please recompile with -DENABLE_SPIRV_CODEGEN=ON" and returns 1. The
+        # standalone DirectXShaderCompiler release is the same compiler built with both, so the
+        # Vulkan blob is produced by that and the D3D12 blob stays with the SDK's -- which is the one
+        # that signs, since signing is dxil.dll's job and the SDK has it beside the compiler.
+        $headers = @{ 'User-Agent' = 'optiscaler-ci' }
+        if ($env:GITHUB_TOKEN) { $headers['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
+
+        $release = Invoke-RestMethod -Headers $headers `
+                     "https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest"
+        $asset = $release.assets | Where-Object { $_.name -like 'dxc_*.zip' } | Select-Object -First 1
+
+        if (-not $asset) { throw "no dxc_*.zip in the latest DirectXShaderCompiler release" }
+
+        Write-Host "SPIR-V compiler: $($release.tag_name) / $($asset.name)"
+        Invoke-WebRequest $asset.browser_download_url -OutFile dxc-release.zip
+        Expand-Archive dxc-release.zip -DestinationPath dxc-release -Force
+
+        $spirvDxc = Get-ChildItem dxc-release -Recurse -Filter dxc.exe |
+                    Where-Object { $_.FullName -match '\\x64\\' } |
+                    Select-Object -First 1
+
+        if (-not $spirvDxc) { throw "no x64 dxc.exe in $($asset.name)" }
+
+        & $spirvDxc.FullName -T cs_6_0 -E CSMain -D VK_MODE=1 -spirv -Fo DlssNr_Shader_Vk.spv dlssnr.hlsl
         if ($LASTEXITCODE -ne 0) { throw "the SPIR-V compile failed" }
 
         python make_header.py DlssNr_Shader.cso    DlssNr_cso  DlssNr_Shader.h

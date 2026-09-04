@@ -273,12 +273,12 @@ void RenderMenu(Config* config, float menuResScale)
                                ? pendingScale
                                : (int) lroundf(config->DlssNrWorkingScale.value_or_default() * 100.0f);
 
-        if (ImGui::SliderInt("Model resolution", &scalePercent, 25, 300, "%d%%"))
+        if (ImGui::SliderInt("Model resolution", &scalePercent, 25, 200, "%d%%"))
             pendingScale = scalePercent;
 
         if (ImGui::IsItemDeactivatedAfterEdit() && pendingScale >= 0)
         {
-            config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 300) / 100.0f;
+            config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
             pendingScale = -1;
         }
 
@@ -286,16 +286,6 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::TextDisabled("Supersampling %.2fx: the model runs ABOVE native, then\n"
                                 "is sampled back down. Experimental, and costly -- time grows with the area.",
                                 scalePercent / 100.0f);
-
-        // Said here rather than only in the help marker, because this is the control that answers the
-        // one complaint the before-the-upscale placement actually has. Running there, native IS the
-        // render raster, so 100% shows the model a third of the picture at ultra performance -- and its
-        // answer, colour most of all, weakens with that raster. Raising this is how it gets shown the
-        // whole picture while the upscaler still receives an edited input.
-        if (config->DlssNrBeforeUpscale.value_or_default())
-            ImGui::TextDisabled("Before the upscale, 100%% is the RENDER resolution. The reciprocal of\n"
-                                "your DLSS mode (200%% at performance, 300%% at ultra performance) shows\n"
-                                "the model a display-resolution picture.");
 
         if (scalePercent > 100)
         {
@@ -324,11 +314,8 @@ void RenderMenu(Config* config, float menuResScale)
                        "\npass costs more than you want to pay for the detail it returns."
                        "\n\nThe frame itself stays at full detail whatever this says -- only the"
                        "\nmodel's own work is done small."
-                       "\n\nRunning BEFORE the upscale this is a fraction of the RENDER resolution, not"
-                       "\nthe display's, so 100% is already a reduced picture -- and the model's answer,"
-                       "\nits colour above all, weakens with the raster it is given. Raise this to the"
-                       "\nreciprocal of your DLSS mode to show it a display-resolution picture and still"
-                       "\nhand the upscaler an edited input.");
+                       "\n\nRunning BEFORE the upscale, 100% is the RENDER resolution rather than the"
+                       "\ndisplay's, so the same percentage is a smaller picture at that placement.");
 
         // Meaningful only when the model runs BELOW the frame's size. At 100% -- and above, where
         // supersampling composites its down-legged answer at native -- the residual collapses to the

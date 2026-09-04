@@ -2066,18 +2066,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // answer change size, and the resolve enlarges (or minifies) the answer while compositing. Below 1
     // the model runs reduced and cheaper; above 1 it SUPERSAMPLES -- the proxy is upscaled to a larger
     // working size so the model denoises a super-native input, which the resolve then samples back down.
-    //
-    // Capped at 3x rather than 2x, because before the upscale 2x is not enough to reach the size that
-    // matters. Running there the model is shown the render raster -- at ultra performance a third of the
-    // display's width -- and the tester's own A/B captures say its answer weakens with that raster: the
-    // colour it returns at 1146x480 is about half the colour it returns at 3440x1440 for the same scene,
-    // which is why the colour-strength blend has nothing to move between at that placement. Three is the
-    // deepest ratio DLSS offers (ultra performance is 1/3), so it is exactly what lets the model be shown
-    // a display-resolution picture wherever the pass is placed, and nothing beyond that is bounded by
-    // anything. Cost grows with the area: at 3x the model costs what it costs after the upscale, which is
-    // the trade this makes available rather than one it makes for anybody.
+    // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
     float workScale = cfg.DlssNrWorkingScale.value_or_default();
-    workScale = workScale < 0.25f ? 0.25f : (workScale > 3.0f ? 3.0f : workScale);
+    workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
     const auto workWidth = (unsigned int) (width * workScale + 0.5f);
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
