@@ -43,7 +43,6 @@
 #include <string>
 #include <vector>
 
-#include "DlssNr_Hdr.h"
 #include "DlssNr_Png.h"
 
 namespace abcapture
@@ -276,22 +275,14 @@ class AbCapture
     // slice: the answer comes out at roughly a fifth of the edit and says far more about the blend
     // weight than about the pass. Holding each state until the history is entirely of that state
     // measures what a player actually sees.
-    //
-    // matched says the finished pair will be taken by running the upscaler twice on ONE frame rather
-    // than once on each of two, which is only possible when the pass runs before the upscale -- there
-    // the pass's output is an upscaler input, so the same frame can be sent through with the edit and
-    // without it. Both evaluates are reset, so neither carries history and the two differ by the edit
-    // alone; the settling below is then only for the model's own temporal state, and the edit stays on
-    // throughout because there is no longer a suppressed phase to build a history for.
-    void request(unsigned int settleFrames, bool matched)
+    void request(unsigned int settleFrames)
     {
         if (stage_ != Stage::Idle)
             return;
 
-        matched_ = matched;
         settle_ = settleFrames;
         countdown_ = settleFrames;
-        stage_ = matched ? Stage::SettlingOn : Stage::SettlingOff;
+        stage_ = Stage::SettlingOff;
     }
 
     bool isActive() const { return stage_ != Stage::Idle; }
@@ -301,29 +292,11 @@ class AbCapture
     // the whole settling run, so the upscaler's history is built entirely from unedited frames.
     bool suppressModel() const
     {
-        // Never on the matched path: its control shot comes from sending the frame through the
-        // upscaler a second time with the game's own colour, so the pass runs normally throughout.
-        if (matched_)
-            return false;
-
         return stage_ == Stage::SettlingOff || stage_ == Stage::SuppressedFrame;
     }
 
     // Whether the seam pair should be taken this frame. Only on the frame the model actually ran.
     bool wantSeam() const { return stage_ == Stage::AppliedFrame; }
-
-    // Whether this frame's upscaler evaluate should be run twice, once each way.
-    bool wantMatchedPair() const { return matched_ && stage_ == Stage::AppliedFrame; }
-
-    // One of the two finished frames from that double evaluate.
-    void recordMatched(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* output,
-                       D3D12_RESOURCE_STATES outputState, bool edited)
-    {
-        if (!wantMatchedPair() || output == nullptr)
-            return;
-
-        takeShot(cmd, device, output, outputState, edited ? withNr_ : noNr_);
-    }
 
     // Records what the model was handed this frame. Called on the frame the model ran.
     void recordHandoff(const Handoff& h)
@@ -351,15 +324,6 @@ class AbCapture
     {
         if (output == nullptr)
             return;
-
-        // On the matched path both finished shots were taken by recordMatched during the evaluate, so
-        // there is nothing left to photograph -- only the drain to start.
-        if (matched_ && stage_ == Stage::AppliedFrame)
-        {
-            stage_ = Stage::Draining;
-            drain_ = 8;
-            return;
-        }
 
         if (stage_ == Stage::SuppressedFrame)
         {
@@ -409,19 +373,9 @@ class AbCapture
         return true;
     }
 
-    // What is written beside the sRGB PNGs. The PNGs are always written -- they are the quick look,
-    // and they are what the note describes -- so this only ever adds files.
-    enum HdrKind : unsigned int
-    {
-        HdrNone = 0,
-        HdrPng = 1, // 16 bit, PQ, marked HDR10: the one to look at
-        HdrExr = 2, // half float, scene linear, unmodified: the one to measure from
-        HdrBoth = 3
-    };
-
     // Writes the four images and a note saying how to read them. Returns the folder, or empty.
     std::string write(const std::filesystem::path& root, float whitePoint, bool passthrough,
-                      bool beforeUpscale, unsigned int hdr)
+                      bool beforeUpscale)
     {
         if (stage_ != Stage::Ready)
             return {};
@@ -439,12 +393,12 @@ class AbCapture
         const float divisor = passthrough ? 1.0f : (whitePoint > 1e-4f ? whitePoint : 1.0f);
 
         bool any = false;
-        any |= dump(dir, "1_no_nr", noNr_, divisor, hdr);
-        any |= dump(dir, "2_with_nr", withNr_, divisor, hdr);
-        any |= dump(dir, "3_seam_before", seamBefore_, divisor, hdr);
-        any |= dump(dir, "4_seam_after", seamAfter_, divisor, hdr);
+        any |= dump(dir / "1_no_nr.png", noNr_, divisor);
+        any |= dump(dir / "2_with_nr.png", withNr_, divisor);
+        any |= dump(dir / "3_seam_before.png", seamBefore_, divisor);
+        any |= dump(dir / "4_seam_after.png", seamAfter_, divisor);
 
-        writeNote(dir, whitePoint, passthrough, beforeUpscale, settle_, hdr);
+        writeNote(dir, whitePoint, passthrough, beforeUpscale, settle_);
         release();
 
         return any ? dir.string() : std::string();
@@ -463,7 +417,6 @@ class AbCapture
         handoff_ = Handoff {};
 
         stage_ = Stage::Idle;
-        matched_ = false;
         drain_ = 0;
         countdown_ = 0;
     }
@@ -553,18 +506,10 @@ class AbCapture
         shot.filled = true;
     }
 
-    // Reads one shot back and writes it out, in every format asked for.
-    //
-    // Three pictures of one buffer, and they are not interchangeable. The sRGB PNG is the quick look:
-    // divided by the paper white the pass itself used, sRGB encoded, eight bits, and saturated at 1 --
-    // so everything above paper white, which is where a colour argument usually lives, is flat white
-    // in all four images at once. The EXR is the frame's own scene-linear values with nothing done to
-    // them, which is the file to measure from. The HDR PNG is display-referred and marked HDR10, which
-    // is the file to look at on an HDR screen.
-    //
-    // The same divisor for all of them, so the set stays comparable to itself.
-    static bool dump(const std::filesystem::path& dir, const char* stem, Shot& shot, float divisor,
-                     unsigned int hdr)
+    // The same transform for every image in the set, so the four are comparable to each other. A
+    // linear frame is divided by the paper white the pass itself used and sRGB-encoded; a frame that
+    // was already display-referred is written as it stands.
+    static bool dump(const std::filesystem::path& path, Shot& shot, float divisor)
     {
         if (!shot.filled || shot.readback == nullptr)
             return false;
@@ -578,17 +523,8 @@ class AbCapture
         const auto width = (unsigned int) shot.desc.Width;
         const auto height = shot.desc.Height;
         const bool isFloat = IsFloatFormat(shot.desc.Format);
-        const bool wantHdr = hdr != HdrNone;
 
         std::vector<uint8_t> rgb((size_t) width * height * 3);
-
-        // The linear frame, kept only when something is going to write it. At 3440x1440 this is 59 MB,
-        // which is not worth holding for a set nobody asked for in HDR.
-        std::vector<float> linear;
-
-        if (wantHdr)
-            linear.resize((size_t) width * height * 3);
-
         bool understood = true;
 
         for (unsigned int y = 0; y < height && understood; ++y)
@@ -615,16 +551,11 @@ class AbCapture
                     if (!std::isfinite(channel))
                         channel = channel > 0.0f ? 3.4e38f : 0.0f;
 
-                    const size_t at = ((size_t) y * width + x) * 3 + c;
-
-                    if (wantHdr)
-                        linear[at] = channel;
-
                     // A linear frame is open-ended and has to be brought into the range a screen
                     // shows; one that is already display-referred is there already.
                     const float v = isFloat ? LinearToSrgb(channel / divisor)
                                             : std::min(std::max(channel, 0.0f), 1.0f);
-                    rgb[at] = (uint8_t) (v * 255.0f + 0.5f);
+                    rgb[((size_t) y * width + x) * 3 + c] = (uint8_t) (v * 255.0f + 0.5f);
                 }
             }
         }
@@ -635,33 +566,11 @@ class AbCapture
         if (!understood)
             return false;
 
-        bool any = dlssnr_png::Write(dir / (std::string(stem) + ".png"), rgb.data(), width, height);
-
-        if (wantHdr && (hdr & HdrExr) != 0)
-        {
-            // Unmodified: not divided, not curved, not clipped. A measurement wants the numbers the
-            // GPU held, and every step this file could add is a step someone has to undo.
-            any |= dlssnr_hdr::WriteExr(dir / (std::string(stem) + ".exr"), linear.data(), width,
-                                        height);
-        }
-
-        if (wantHdr && (hdr & HdrPng) != 0)
-        {
-            // Display-referred, so this one IS divided: PQ is an absolute curve and needs to be told
-            // where white is. A frame that was already tone mapped arrives with white at 1 already,
-            // which is what the divisor is for that case.
-            for (float& v : linear)
-                v /= divisor;
-
-            any |= dlssnr_hdr::WriteHdrPng(dir / (std::string(stem) + "_hdr.png"), linear.data(),
-                                           width, height);
-        }
-
-        return any;
+        return dlssnr_png::Write(path, rgb.data(), width, height);
     }
 
     void writeNote(const std::filesystem::path& dir, float whitePoint, bool passthrough,
-                   bool beforeUpscale, unsigned int settle, unsigned int hdr) const
+                   bool beforeUpscale, unsigned int settle) const
     {
         const auto path = dir / "info.txt";
         std::FILE* f = _wfopen(path.wstring().c_str(), L"wt");
@@ -674,42 +583,22 @@ class AbCapture
                      beforeUpscale ? "BEFORE (render resolution)" : "AFTER (display resolution)");
 
         std::fprintf(f, "1_no_nr.png      the finished frame with the model's edit held back\n");
-        std::fprintf(f, "2_with_nr.png    the finished frame with it applied%s\n",
-                     matched_ ? ", the SAME frame as 1" : ", the very next frame");
+        std::fprintf(f, "2_with_nr.png    the finished frame with it applied, the very next frame\n");
         std::fprintf(f, "3_seam_before.png  what the pass was shown\n");
         std::fprintf(f, "4_seam_after.png   what it produced -- the SAME frame as 3, exactly\n\n");
-
-        if (hdr != HdrNone)
-            std::fprintf(f, "Each of those four also written in HDR -- see the bottom of this file.\n\n");
 
         std::fprintf(f, "3 and 4 are one frame, copied either side of the resolve, so nothing at all\n"
                         "differs between them but the edit. That is the pair to read when asking\n"
                         "whether the pass is implemented right.\n\n");
 
-        if (matched_)
-            std::fprintf(f, "1 and 2 are ONE frame as well. Running before the upscale the pass writes an\n"
-                            "upscaler input rather than the finished frame, so that one frame can be sent\n"
-                            "through the upscaler twice -- once with the game's own colour and once with\n"
-                            "the edited copy -- and photographed after each. Nothing between them differs\n"
-                            "but the edit: same geometry, same jitter, same everything, and no camera\n"
-                            "movement is possible because there is no second frame to move in.\n\n"
-                            "Both evaluates are RESET, so neither carries accumulated history and the two\n"
-                            "are symmetric. That is the price of matching them: these are single-frame\n"
-                            "resolves and will look rawer than play does, and the game shows one reset\n"
-                            "frame while the capture is taken. What they measure exactly is how much of\n"
-                            "the pass's edit one upscaler pass carries through, which is the question the\n"
-                            "two-consecutive-frames pair could only answer with a camera held still.\n\n"
-                            "The model's own temporal state was settled for %u frames first.\n\n",
-                         settle);
-        else
-            std::fprintf(f, "1 and 2 each had their state held for %u frames before being photographed, so\n"
-                            "the upscaler's history was entirely of that state when the shot was taken.\n"
-                            "Without that hold the second shot would catch a single edited frame blended\n"
-                            "into a history of unedited ones, and a temporal upscaler keeps only a small\n"
-                            "slice of the current frame -- the answer would come out at about a fifth of\n"
-                            "the edit and would be measuring the blend weight, not the pass.\n\n"
-                            "The run takes roughly %u frames end to end. Hold still for all of it.\n\n",
-                         settle, settle * 2 + 12);
+        std::fprintf(f, "1 and 2 each had their state held for %u frames before being photographed, so\n"
+                        "the upscaler's history was entirely of that state when the shot was taken.\n"
+                        "Without that hold the second shot would catch a single edited frame blended\n"
+                        "into a history of unedited ones, and a temporal upscaler keeps only a small\n"
+                        "slice of the current frame -- the answer would come out at about a fifth of\n"
+                        "the edit and would be measuring the blend weight, not the pass.\n\n"
+                        "The run takes roughly %u frames end to end. Hold still for all of it.\n\n",
+                     settle, settle * 2 + 12);
 
         if (beforeUpscale)
             std::fprintf(f, "Running before the upscale, 3 and 4 are at render resolution and 1 and 2\n"
@@ -719,25 +608,6 @@ class AbCapture
                         "applied, so they are comparable to each other but not to a screenshot taken\n"
                         "any other way.\n",
                      whitePoint, passthrough ? "off (the frame was already tone mapped)" : "on");
-
-        if ((hdr & HdrExr) != 0)
-            std::fprintf(f, "\n.exr -- the same four frames with their range intact: half float, and\n"
-                            "the buffer's own scene-linear values with NOTHING done to them. Not divided\n"
-                            "by paper white, not curved, not clipped. Measure from these; the .png beside\n"
-                            "each one saturates at paper white, so a sky or a specular hit is flat white\n"
-                            "in all four at once and cannot be compared there at all. Photoshop, Affinity,\n"
-                            "GIMP, Krita, DaVinci and ImageMagick read them; Windows Photos does not.\n");
-
-        if ((hdr & HdrPng) != 0)
-            std::fprintf(f, "\n_hdr.png -- the same four frames to LOOK at on an HDR screen: 16 bits a\n"
-                            "channel, PQ encoded, BT.2020, marked HDR10 with a cICP chunk, with paper\n"
-                            "white placed at the 203 nits BT.2408 specifies. Windows Photos, Chrome and\n"
-                            "Edge display them as real HDR. These are display-referred rather than the\n"
-                            "frame's own numbers, so look at these and measure from the .exr.\n"
-                            "\nPQ stops at 10000 nits, which at 203 nits of paper white is 49x it, so a\n"
-                            "pixel brighter than that clips here. Real frames do reach it -- the sun, a\n"
-                            "muzzle flash -- and the .exr does not clip, which is the other reason it is\n"
-                            "the one to measure from.\n");
 
         if (!handoff_.valid)
         {
@@ -794,7 +664,6 @@ class AbCapture
     Shot seamAfter_ {};
 
     Stage stage_ = Stage::Idle;
-    bool matched_ = false;
     int drain_ = 0;
     unsigned int settle_ = 0;
     unsigned int countdown_ = 0;

@@ -1079,25 +1079,7 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
         UpscalerInputsDx12::UpscaleEnd(InCmdList, InParameters, feature);
 
         ScopedSkipHeapCapture skip {};
-
-        // On the one frame of an A/B capture that is taking a matched finished pair, this same
-        // evaluate runs twice -- once on the game's own colour and once on the edited copy -- so the
-        // capture's two finished frames are one frame rather than two consecutive ones. Every other
-        // frame takes the branch below and is untouched.
-        if (nrSwapped && DlssNr::WantMatchedPair())
-        {
-            evalSuccess = DlssNr::EvaluateMatchedPair(
-                              InCmdList, InParameters,
-                              [&]() {
-                                  return feature->Evaluate(InCmdList, InParameters)
-                                             ? NVSDK_NGX_Result_Success
-                                             : NVSDK_NGX_Result_Fail;
-                              }) == NVSDK_NGX_Result_Success;
-        }
-        else
-        {
-            evalSuccess = feature->Evaluate(InCmdList, InParameters);
-        }
+        evalSuccess = feature->Evaluate(InCmdList, InParameters);
     }
 
     if (nrSwapped)
@@ -1202,17 +1184,8 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
                 nrSwapped = DlssNr::EvaluateBeforeUpscale(InCmdList, InParameters);
             }
 
-            // Twice on the one frame of an A/B capture that is taking a matched finished pair; once
-            // on every other frame, which is the path this has always taken.
-            const auto once = [&]()
-            {
-                return NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters,
-                                                           InCallback);
-            };
-
-            NVSDK_NGX_Result result = (nrSwapped && DlssNr::WantMatchedPair())
-                                          ? DlssNr::EvaluateMatchedPair(InCmdList, InParameters, once)
-                                          : once();
+            NVSDK_NGX_Result result =
+                NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
             LOG_DEBUG("Native DLSS EvaluateFeature result: 0x{:X}", (uint32_t) result);
 
             if (nrSwapped)

@@ -403,15 +403,6 @@ class Config
     // finished frame. The defaults are the measured inverses of what one A/B capture said survives --
     // 83% of the luminance and 48% of the colour -- so 1.0 in both turns the compensation off and is
     // how to check it.
-    // Whether the capture's finished pair comes from one frame sent through the upscaler twice rather
-    // than from two consecutive frames. Only possible before the upscale, and it costs the game one
-    // reset frame -- so the pair is exactly matched but rawer than play looks.
-    CustomOptional<bool> DlssNrAbCaptureMatched { true };
-
-    // What the A/B capture writes beside its sRGB PNGs: 0 nothing, 1 a 16-bit PQ PNG marked HDR10,
-    // 2 an OpenEXR of the buffer's own scene-linear values, 3 both. The PNGs are always written.
-    CustomOptional<uint32_t> DlssNrCaptureHdr { 1 };
-
     CustomOptional<float> DlssNrCompLuma { 1.2f };
     CustomOptional<float> DlssNrCompChroma { 2.05f };
 

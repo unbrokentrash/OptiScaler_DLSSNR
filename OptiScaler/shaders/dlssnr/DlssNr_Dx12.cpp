@@ -23,7 +23,6 @@
 #include <mutex>
 #include <algorithm>
 #include <cstring>
-#include <functional>
 #include "precompile/DlssNr_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 
@@ -459,19 +458,6 @@ unsigned long long g_captureWriteAtFrame = 0;
 
 // Dropping a file named dlssnr-capture.trigger beside OptiScaler requests a capture, so a session can
 // be asked for one from outside the game -- no alt-tab, no menu. Checked once a second, effectively.
-// Whether a capture asked for now would take its finished pair from one frame.
-//
-// The matched pair needs the pass to be writing an upscaler input rather than the finished frame --
-// only then can the one frame be sent through the upscaler both ways. After the upscale the seam pair
-// is already the matched pair at display resolution, so nothing is missing there.
-//
-// Both ways of asking for a capture read this, rather than each deciding for itself.
-bool AbMatchedWanted()
-{
-    const Config& cfg = *Config::Instance();
-    return cfg.DlssNrBeforeUpscale.value_or_default() && cfg.DlssNrAbCaptureMatched.value_or_default();
-}
-
 void CheckCaptureTrigger()
 {
     if ((g_frames % 60) != 0)
@@ -495,7 +481,7 @@ void CheckCaptureTrigger()
     if (std::filesystem::exists(abTrigger, ec))
     {
         std::filesystem::remove(abTrigger, ec);
-        g_ab.request(Config::Instance()->DlssNrAbCaptureSettle.value_or_default(), AbMatchedWanted());
+        g_ab.request(Config::Instance()->DlssNrAbCaptureSettle.value_or_default());
         LOG_INFO("DLSS-NR A/B capture requested by trigger file");
     }
 }
@@ -1520,8 +1506,7 @@ void CaptureFinishedFrame(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     ClearCaptureDirectory();
     const auto root = Util::DllPath().remove_filename() / "dlssnr-capture";
     const auto written = g_ab.write(root, g_lastWhitePoint, g_lastPassthrough,
-                                    Config::Instance()->DlssNrBeforeUpscale.value_or_default(),
-                                    Config::Instance()->DlssNrCaptureHdr.value_or_default());
+                                    Config::Instance()->DlssNrBeforeUpscale.value_or_default());
 
     if (!written.empty())
         LOG_INFO("DLSS-NR wrote an A/B capture to {}", written);
@@ -3126,120 +3111,6 @@ static const char* g_swappedColourKey = nullptr;
 static ID3D12Resource* g_swappedColourTyped = nullptr;
 static void* g_swappedColourUntyped = nullptr;
 
-// Whether this frame's upscaler evaluate is to be run twice. Answered here rather than by the caller
-// because it depends on a capture's state, which is this file's.
-bool WantMatchedPair()
-{
-    std::lock_guard<std::mutex> nrLock(g_nrMutex);
-    return g_ab.wantMatchedPair() && g_swappedColourKey != nullptr;
-}
-
-// The finished frame, both ways, from one frame of the game.
-//
-// The pair the capture writes as 1 and 2 used to be two consecutive frames, because running before the
-// upscale means the finished frame does not exist when the pass runs and no upscaler can be asked for
-// two of them. It can be asked twice, though, and that is what this does: the same inputs go through
-// the upscaler once with the game's own colour and once with the edited copy, and the output is
-// photographed after each. Nothing between them differs but the edit -- not the geometry, not the
-// jitter, and not the camera, because there is no second frame for it to move in.
-//
-// Both evaluates are reset. Without that the second would see history the first had just written and
-// the pair would be asymmetric in exactly the way it exists to avoid; with it neither carries history,
-// so the two are single-frame resolves of one frame and differ by the edit alone. The game wears one
-// reset frame for it, which is what the capture is spending.
-//
-// Failure is not special-cased: the caller's own evaluate is what runs, and a bad result comes back
-// unchanged. The worst outcome is a capture with nothing in its finished pair, which the writer
-// already reports.
-NVSDK_NGX_Result EvaluateMatchedPair(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                                     const std::function<NVSDK_NGX_Result()>& evaluate)
-{
-    if (cmdList == nullptr || params == nullptr || !evaluate)
-        return NVSDK_NGX_Result_Fail;
-
-    const char* colourKey = nullptr;
-    ID3D12Resource* gameColour = nullptr;
-    void* gameColourUntyped = nullptr;
-    ID3D12Resource* edited = nullptr;
-    void* editedUntyped = nullptr;
-
-    {
-        std::lock_guard<std::mutex> nrLock(g_nrMutex);
-
-        colourKey = g_swappedColourKey;
-        gameColour = g_swappedColourTyped;
-        gameColourUntyped = g_swappedColourUntyped;
-    }
-
-    if (colourKey == nullptr)
-        return evaluate();
-
-    // What the swap left in the block, so it can be put back for the second pass.
-    params->Get(colourKey, &edited);
-    params->Get(colourKey, &editedUntyped);
-
-    // Both spellings of Reset, for the same reason the colour swap writes both. The SDK's own helper
-    // sets it with SetI while every upscaler in this tree reads it with an unsigned Get, and on a real
-    // NGX block those are separate slots -- so writing one would leave whichever the consumer reads
-    // holding the game's value and the second evaluate would quietly keep its history.
-    int savedResetI = 0;
-    unsigned int savedResetU = 0;
-    params->Get(NVSDK_NGX_Parameter_Reset, &savedResetI);
-    params->Get(NVSDK_NGX_Parameter_Reset, &savedResetU);
-
-    const auto setReset = [&](int v)
-    {
-        params->Set(NVSDK_NGX_Parameter_Reset, v);
-        params->Set(NVSDK_NGX_Parameter_Reset, (unsigned int) v);
-    };
-
-    ID3D12Device* device = nullptr;
-    ID3D12Resource* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
-
-    if (output != nullptr && FAILED(output->GetDevice(IID_PPV_ARGS(&device))))
-        device = nullptr;
-
-    const D3D12_RESOURCE_STATES arrival =
-        Config::Instance()->OutputResourceBarrier.has_value()
-            ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
-            : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-
-    // The control: the game's own colour, exactly as if Neural Rendering were off.
-    params->Set(colourKey, gameColour);
-    params->Set(colourKey, gameColourUntyped);
-    setReset(1);
-    evaluate();
-
-    if (device != nullptr)
-    {
-        std::lock_guard<std::mutex> nrLock(g_nrMutex);
-        g_ab.recordMatched(cmdList, device, output, arrival, false);
-    }
-
-    // And the same frame again, with the pass's edit.
-    params->Set(colourKey, edited);
-    params->Set(colourKey, editedUntyped);
-    setReset(1);
-    const NVSDK_NGX_Result result = evaluate();
-
-    if (device != nullptr)
-    {
-        {
-            std::lock_guard<std::mutex> nrLock(g_nrMutex);
-            g_ab.recordMatched(cmdList, device, output, arrival, true);
-        }
-
-        device->Release();
-    }
-
-    // The game's own reset flag back where it was, so the frame after this one is the game's again.
-    params->Set(NVSDK_NGX_Parameter_Reset, savedResetI);
-    params->Set(NVSDK_NGX_Parameter_Reset, savedResetU);
-
-    LOG_INFO("DLSS-NR A/B: took the finished pair from one frame, both evaluates reset");
-    return result;
-}
-
 bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                            ID3D12CommandQueue* timingQueue)
 {
@@ -3568,8 +3439,7 @@ bool CaptureInProgress() { return g_capture.isActive(); }
 void RequestAbCapture()
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
-
-    g_ab.request(Config::Instance()->DlssNrAbCaptureSettle.value_or_default(), AbMatchedWanted());
+    g_ab.request(Config::Instance()->DlssNrAbCaptureSettle.value_or_default());
 }
 
 bool AbCaptureInProgress()
