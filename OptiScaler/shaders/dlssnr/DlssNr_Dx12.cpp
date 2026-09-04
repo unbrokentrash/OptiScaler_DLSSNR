@@ -2637,9 +2637,30 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
-    // The vectors were scaled to full-frame pixels; the image the model reprojects is the
-    // working size.
-    const float mvToWork = width != 0 ? (float) workWidth / (float) width : 1.0f;
+    // The motion-vector scale, and an honest account of why there is a setting here.
+    //
+    // The game's own MVecScale is read and passed through, never derived -- deriving it was a real bug
+    // and the comment where it is read still says so. What is NOT settled is what happens on top of it
+    // when the model works at a different raster from the frame.
+    //
+    // This file contains both answers. Here it multiplies the scale by workWidth/width, on the reading
+    // that the vectors describe displacement in frame pixels and the model reprojects an image of the
+    // working size. Forty lines up, where the scale is stored, the comment says the opposite: "every
+    // resource already carries a subrect saying how big it is, so scaling by the resolution ratio on
+    // top of that counts it twice -- vectors come out too long and the model warps its history past
+    // where the surface went." Both cannot be right. If the model rescales from the MVec subrect to
+    // its own raster itself, this factor is applied twice; if it does not, this factor is the only
+    // thing making the vectors the right length.
+    //
+    // It is exactly 1.0 whenever the model is at 100%, which is why nothing has ever depended on
+    // knowing the answer -- and it is not 1.0 at every other setting, which is where motion has been
+    // reported as bad. Half-length vectors and doubled vectors both look like smearing during motion,
+    // so the symptom does not distinguish them either.
+    //
+    // Rather than guess, it is a switch, defaulting to what shipped. Mode 0 hands over the game's value
+    // untouched, which is right if the model does its own rescaling.
+    const float mvRatio = width != 0 ? (float) workWidth / (float) width : 1.0f;
+    const float mvToWork = cfg.DlssNrMvScaleMode.value_or_default() == 0 ? 1.0f : mvRatio;
 
     SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
 
@@ -2724,6 +2745,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         h.depthInvertedOverridden = Config::Instance()->DepthInverted.has_value();
         h.mvScaleX = g_nr.guideMvScaleX * mvToWork;
         h.mvScaleY = g_nr.guideMvScaleY * mvToWork;
+        h.mvScaleGameX = g_nr.guideMvScaleX;
+        h.mvScaleGameY = g_nr.guideMvScaleY;
+        h.mvScaleMode = cfg.DlssNrMvScaleMode.value_or_default();
         h.reset = resetThisFrame;
         h.jitterX = frame.JitterX;
         h.jitterY = frame.JitterY;

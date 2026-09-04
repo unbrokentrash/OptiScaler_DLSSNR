@@ -407,6 +407,14 @@ class Config
     // as black) and, once that was fixed, the idea underneath is still only a gain -- it can ask an
     // upscaler for more of an edit, not make it carry what it declined to. Left here because asking
     // is cheap and the answer is worth having per game, but the shipped picture is the composed one.
+    // Which convention the model's motion-vector scale is handed over in when the model is NOT at
+    // 100%: 0 the game's own value untouched, 1 that value times workWidth/width (the shipped
+    // behaviour). At 100% the two are identical and this setting does nothing.
+    //
+    // Two conventions because the code contains both assumptions and neither has been verified
+    // against the model. See the comment at the point of use.
+    CustomOptional<uint32_t> DlssNrMvScaleMode { 1 };
+
     CustomOptional<float> DlssNrCompLuma { 1.0f };
     CustomOptional<float> DlssNrCompChroma { 1.0f };
 

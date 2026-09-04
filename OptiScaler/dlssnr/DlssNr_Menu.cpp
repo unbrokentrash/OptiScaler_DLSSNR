@@ -173,6 +173,35 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::EndDisabled();
         }
 
+        {
+            static const char* mvNames[] = { "As the game gave it", "Times model / frame (shipped)" };
+            int mvMode = (int) config->DlssNrMvScaleMode.value_or_default();
+
+            if (mvMode < 0 || mvMode >= IM_ARRAYSIZE(mvNames))
+                mvMode = 1;
+
+            ImGui::PushItemWidth(220.0f * menuResScale);
+
+            if (ImGui::Combo("Motion vector scale", &mvMode, mvNames, IM_ARRAYSIZE(mvNames)))
+                config->DlssNrMvScaleMode = (uint32_t) mvMode;
+
+            ImGui::PopItemWidth();
+        }
+
+        HelpMarker("Which convention the model's motion-vector scale is handed over in. Does NOTHING"
+                       "\nat 100% model resolution -- the two are identical there -- and matters at"
+                       "\nevery other setting."
+                       "\n\nThe game's own scale is always read and passed through; this is only about"
+                       "\nwhat is applied ON TOP when the model works at a different size from the frame."
+                       "\n\nThe code contains both answers and neither has been verified against the"
+                       "\nmodel. If the model rescales the vectors from their subrect to its own raster"
+                       "\nitself, the shipped factor is applied twice and the vectors come out wrong;"
+                       "\nif it does not, the factor is the only thing making them the right length."
+                       "\n\nBoth failures look the same from outside -- smearing and ghosting during"
+                       "\nmotion -- so this is a switch rather than a guess. Try both while moving the"
+                       "\ncamera with the model below 100% and keep whichever tracks properly. The A/B"
+                       "\ncapture writes down the game's value and the handed-over one separately.");
+
         HelpMarker("Scales the model's edit up before the upscaler downstream discards part of it."
                        "\n\nOFF by default (1.00 in both), and an experiment rather than a fix: a gain"
                        "\ncan ask an upscaler for more of an edit, it cannot make it carry what it"

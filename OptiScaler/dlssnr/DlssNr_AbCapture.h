@@ -245,6 +245,8 @@ struct Handoff
     bool depthInverted = false;
     bool depthInvertedOverridden = false;
     float mvScaleX = 0.0f, mvScaleY = 0.0f;         // as handed to the model, after any working scale
+    float mvScaleGameX = 0.0f, mvScaleGameY = 0.0f; // as the game itself reported it
+    unsigned int mvScaleMode = 1;                   // 0 the game's value untouched, 1 times work/frame
     bool reset = false;
     float jitterX = 0.0f, jitterY = 0.0f;           // the camera offset, in render pixels
     unsigned int dejitterMode = 0;                  // 0 off, 1 subtract, 2 add
@@ -639,7 +641,12 @@ class AbCapture
         // set the flag is the common case, and is worth telling apart from "no" that somebody chose.
         std::fprintf(f, "depth inverted %s  (%s)\n", h.depthInverted ? "yes" : "no",
                      h.depthInvertedOverridden ? "your override" : "the game's DLSS create flag");
-        std::fprintf(f, "mv scale       %.4f x %.4f  (as handed over)\n", h.mvScaleX, h.mvScaleY);
+        // Both numbers, because the difference between them is a setting and the difference is the
+        // whole question: whether the model rescales the vectors from their subrect to its own raster
+        // or expects that to have been done for it.
+        std::fprintf(f, "mv scale       %.4f x %.4f  (the game said %.4f x %.4f; mode %u, %s)\n",
+                     h.mvScaleX, h.mvScaleY, h.mvScaleGameX, h.mvScaleGameY, h.mvScaleMode,
+                     h.mvScaleMode == 0 ? "passed through" : "times model/frame");
         std::fprintf(f, "history reset  %s\n", h.reset ? "yes" : "no");
         std::fprintf(f, "jitter         %+.4f, %+.4f pixels   de-jitter %s\n", h.jitterX, h.jitterY,
                      h.dejitterMode == 0 ? "off" : (h.dejitterMode == 1 ? "on (subtract)" : "on (add)"));
