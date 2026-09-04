@@ -121,6 +121,12 @@ struct NrSizes
     // Reported so the answer to "did that toggle do anything" is on screen rather than in a log file.
     bool upscaling = false;
     bool upscalingRefused = false;
+
+    // What the model answered when asked what it wants to run at, per quality level, and whether it
+    // answered at all. This decides whether its upscaling is reachable, and it was only ever written
+    // to a log file that is off by default -- so it was, in practice, unreadable.
+    float ratios[6] = { -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
+    bool ratiosKnown = false;
 };
 
 NrSizes Sizes();

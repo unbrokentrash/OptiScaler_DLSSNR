@@ -432,6 +432,33 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::EndDisabled();
         }
 
+        // The model's own answer about whether it can upscale at all, on screen rather than in a log
+        // file that is off by default. Asking a tester to enable logging, find the file and grep it for
+        // one line -- three times over -- was a worse interface than four numbers here.
+        {
+            const auto sizes = DlssNr::Sizes();
+
+            if (sizes.ratiosKnown)
+            {
+                static const char* qNames[] = { "Perf", "Balanced", "Quality", "UltraPerf", "UltraQ", "DLAA" };
+                char line[256] = {};
+                int used = 0;
+
+                for (int q = 0; q < 6 && used < (int) sizeof(line) - 1; ++q)
+                {
+                    if (sizes.ratios[q] > 0.0f)
+                        used += snprintf(line + used, sizeof(line) - used, "%s %.2f  ", qNames[q],
+                                         sizes.ratios[q]);
+                }
+
+                ImGui::TextDisabled("The model's own scaling ratios: %s", line);
+            }
+            else
+            {
+                ImGui::TextDisabled("The model published no scaling ratios -- it may not upscale at all.");
+            }
+        }
+
         HelpMarker("Hands the model a small frame and asks it for a large one, instead of running it"
                        "\nsmall and stretching its edit."
                        "\n\nModel resolution below 100% has never used the model's own upscaling. It"

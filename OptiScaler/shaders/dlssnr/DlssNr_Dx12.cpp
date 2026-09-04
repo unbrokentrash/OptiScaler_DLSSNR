@@ -3823,6 +3823,11 @@ NrSizes Sizes()
     s.modelHeight = g_nr.workHeight;
     s.upscaling = g_nr.builtScaled;
     s.upscalingRefused = g_nr.scaledRefused;
+    s.ratiosKnown = g_nr.ratiosKnown;
+
+    for (int i = 0; i < 6; ++i)
+        s.ratios[i] = g_nr.ratios[i];
+
     return s;
 }
 
