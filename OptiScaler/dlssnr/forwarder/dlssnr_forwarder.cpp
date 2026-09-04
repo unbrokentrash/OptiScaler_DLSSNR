@@ -859,6 +859,23 @@ __declspec(dllexport) int dlssnr_call_evaluate(ID3D12GraphicsCommandList *cmd, v
 // Nothing else differs. Same feature id, same tuning, same subrect discipline -- the colour carries the
 // input's size and the output carries the output's, which is the same rule the guides already follow.
 
+// The quality level the model derives its own scaling ratio from.
+//
+// Its error strings name this directly -- "missing PerfQualityValue for DLSSNR scaling ratio
+// computation", then "unsupported PerfQualityValue %u" -- so the upscaling is preset-driven rather
+// than free-dimensioned, and a create that hands over arbitrary sizes without it is asking for
+// something the model has no way to compute.
+//
+// A separate export rather than another parameter on the create, so a host and a forwarder that
+// disagree about this find out by name instead of through a signature that changed under them. The
+// block outlives the call, so setting it beforehand is enough.
+__declspec(dllexport) void dlssnr_call_set_perf_quality(void *capabilityParams, unsigned int quality) {
+    if (!capabilityParams) {
+        return;
+    }
+    setUInt(capabilityParams, "PerfQualityValue", quality);
+}
+
 static void setScalingParams(void *capabilityParams, unsigned int inW, unsigned int inH,
                              unsigned int outW, unsigned int outH) {
     setUInt(capabilityParams, "DLSSNR.Upscaling", 1);

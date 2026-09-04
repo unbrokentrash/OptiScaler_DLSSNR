@@ -201,6 +201,7 @@ struct NrState
 {
     HMODULE forwarder = nullptr;
     PFN_NrCreate create = nullptr;
+    void (*setPerfQuality)(void*, unsigned int) = nullptr;
     PFN_NrCreateScaled createScaled = nullptr;
     PFN_NrEvaluateScaled evaluateScaled = nullptr;
 
@@ -227,6 +228,13 @@ struct NrState
 
     // The scaling-ratio probe, resolved alongside the other forwarder entry points.
     int (*queryRatio)(const wchar_t*, void*, unsigned int, float*) = nullptr;
+
+    // What the model answered when asked what it wants to run at, per quality level. Kept rather than
+    // only logged: its own error strings say the upscaling is computed FROM a PerfQualityValue, so
+    // these are the ratios it will actually accept, and asking for one it never offered is asking for
+    // something it has no way to compute.
+    float ratios[6] = { -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
+    bool ratiosKnown = false;
     const int* lastRatioStage = nullptr;
     int* lastInit = nullptr;
     int* lastCreate = nullptr;
@@ -583,6 +591,8 @@ bool EnsureForwarder()
     g_nr.lastRatioStage = (const int*) GetProcAddress(g_nr.forwarder, "dlssnr_last_ratio_stage");
 
     g_nr.create = (PFN_NrCreate) GetProcAddress(g_nr.forwarder, "dlssnr_call_create");
+    g_nr.setPerfQuality =
+        (void (*)(void*, unsigned int)) GetProcAddress(g_nr.forwarder, "dlssnr_call_set_perf_quality");
     g_nr.createScaled = (PFN_NrCreateScaled) GetProcAddress(g_nr.forwarder, "dlssnr_call_create_scaled");
     g_nr.evaluateScaled =
         (PFN_NrEvaluateScaled) GetProcAddress(g_nr.forwarder, "dlssnr_call_evaluate_scaled");
@@ -684,6 +694,7 @@ void ReportScalingRatios()
         if (rc == 1)
         {
             any = true;
+            g_nr.ratios[q] = ratio;
             written = snprintf(line + used, sizeof(line) - used, "%s=%.4f ", kNames[q], ratio);
         }
         else if (rc == -1)
@@ -695,11 +706,49 @@ void ReportScalingRatios()
             used += (size_t) written;
     }
 
+    g_nr.ratiosKnown = any;
+
     if (any)
         LOG_INFO("DLSS-NR the model's own scaling ratios: {}", line);
+
     else
         LOG_INFO("DLSS-NR scaling ratio callback not published by this snippet (stage {})",
                  g_nr.lastRatioStage != nullptr ? *g_nr.lastRatioStage : -1);
+}
+
+// The quality level whose own ratio is nearest the one being asked for, or -1 when the model never
+// published any.
+//
+// Asking the model to upscale by a ratio it does not offer is the likeliest reason it declines: the
+// upscaling is computed from a PerfQualityValue, so the ratio is the model's to choose and ours only
+// to select from. This turns "I want 0.5" into "the preset you call Performance", which is the form
+// the question has to be in.
+int NearestQuality(float wanted, float* got)
+{
+    if (!g_nr.ratiosKnown)
+        return -1;
+
+    int best = -1;
+    float bestErr = 0.0f;
+
+    for (int q = 0; q < 6; ++q)
+    {
+        if (g_nr.ratios[q] <= 0.0f)
+            continue;
+
+        const float err = std::abs(g_nr.ratios[q] - wanted);
+
+        if (best < 0 || err < bestErr)
+        {
+            best = q;
+            bestErr = err;
+        }
+    }
+
+    if (best >= 0 && got != nullptr)
+        *got = g_nr.ratios[best];
+
+    return best;
 }
 
 // Works out which vtable slot this parameter block keeps floats in, by writing a known value through
@@ -2146,6 +2195,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const unsigned int answerWidth = modelUpscale ? width : workWidth;
     const unsigned int answerHeight = modelUpscale ? height : workHeight;
 
+    // And what it is fed. When it upscales, the input size is the model's to choose -- it comes from
+    // the ratio its own quality level publishes, not from the slider -- so the proxy has to be reduced
+    // to THAT rather than to what the slider asked for, or the picture and the subrect disagree.
+    const unsigned int feedWidth =
+        (modelUpscale && g_nr.builtScaled && g_nr.builtInWidth != 0) ? g_nr.builtInWidth : workWidth;
+    const unsigned int feedHeight =
+        (modelUpscale && g_nr.builtScaled && g_nr.builtInHeight != 0) ? g_nr.builtInHeight : workHeight;
+
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
@@ -2222,8 +2279,18 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.workHeight = workHeight;
     }
 
+    // The size the model is fed can change once it has been built -- it publishes its own ratio, which
+    // need not be the slider's -- so the surface is checked against it rather than only against null.
+    if (g_nr.colorSmall != nullptr)
+    {
+        const D3D12_RESOURCE_DESC sd = g_nr.colorSmall->GetDesc();
+
+        if ((unsigned int) sd.Width != feedWidth || sd.Height != feedHeight)
+            ParkNrResource(g_nr.colorSmall);
+    }
+
     if (reduced && g_nr.colorSmall == nullptr)
-        g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.colorSmall = CreateScratch(device, desc.Format, feedWidth, feedHeight);
 
     // The accumulation, at the frame's size, built only when it is asked for -- two full surfaces is
     // not a cost to pay for a feature that is off.
@@ -2318,9 +2385,43 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (wantScaled)
         {
+            // Ask for a ratio the model actually offers, and name the preset it belongs to.
+            //
+            // Its own error strings -- "missing PerfQualityValue for DLSSNR scaling ratio computation",
+            // then "unsupported PerfQualityValue" -- say the upscaling is computed FROM a quality level.
+            // The first attempt handed over raw dimensions and never set one, which asks the model for
+            // a number it has no way to derive. This turns the slider's ratio into the nearest preset
+            // the model published and takes the input size from THAT rather than from the slider, so
+            // the dimensions are exactly the ones it expects to be given.
+            unsigned int scaledInW = workWidth;
+            unsigned int scaledInH = workHeight;
+            float modelRatio = 0.0f;
+            const int quality = NearestQuality((float) workWidth / (float) width, &modelRatio);
+
+            if (quality >= 0 && modelRatio > 0.0f)
+            {
+                scaledInW = (unsigned int) ((float) width * modelRatio + 0.5f);
+                scaledInH = (unsigned int) ((float) height * modelRatio + 0.5f);
+
+                if (g_nr.setPerfQuality != nullptr)
+                    g_nr.setPerfQuality(g_nr.capabilityParams, (unsigned int) quality);
+
+                LOG_INFO("DLSS-NR upscaling: asked for {:.3f}, taking the model's own {:.3f} "
+                         "(PerfQualityValue {}), so {}x{} in", (float) workWidth / (float) width,
+                         modelRatio, quality, scaledInW, scaledInH);
+            }
+            else
+            {
+                LOG_WARN("DLSS-NR upscaling: the model published no scaling ratios, so its own quality "
+                         "level cannot be named -- asking with raw dimensions, which it may decline");
+            }
+
+            g_nr.builtInWidth = scaledInW;
+            g_nr.builtInHeight = scaledInH;
+
             g_nr.feature = g_nr.createScaled(
                 snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device,
-                cmdList, g_nr.capabilityParams, workWidth, workHeight, width, height,
+                cmdList, g_nr.capabilityParams, scaledInW, scaledInH, width, height,
                 (int) cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
                 (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
                 cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
@@ -2331,8 +2432,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             if (g_nr.feature != nullptr)
             {
                 g_nr.builtScaled = true;
-                LOG_INFO("DLSS-NR: the model is upscaling, {}x{} in -> {}x{} out", workWidth, workHeight,
-                         width, height);
+                LOG_INFO("DLSS-NR: the model is upscaling, {}x{} in -> {}x{} out", g_nr.builtInWidth,
+                         g_nr.builtInHeight, width, height);
             }
             else
             {
@@ -2832,8 +2933,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // Sub-native (or the upsampler could not be built): box-resample the proxy to the work size.
             DlssNrConstants down {};
             down.Mode = DlssNrMode_Downsample;
-            down.Width = workWidth;
-            down.Height = workHeight;
+            down.Width = feedWidth;
+            down.Height = feedHeight;
             DispatchPass(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr,
                                 g_nr.colorSmall, nullptr);
             Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
