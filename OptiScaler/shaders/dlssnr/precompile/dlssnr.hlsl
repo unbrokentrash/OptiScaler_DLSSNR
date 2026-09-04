@@ -32,7 +32,30 @@ cbuffer Params : register(b0)
     float gJitterX;        // the camera's sub-pixel offset this frame, in pixels of this dispatch
     float gJitterY;
     uint  gDejitterMode;   // 0 off, 1 subtract it from what the model is shown, 2 add it
+    float gCompLuma;       // pre-compensation for what the upscaler discards: 1 (or 0) is off
+    float gCompChroma;
 };
+
+// How much the edit is boosted before an upscaler gets to eat some of it.
+//
+// Only meaningful when the pass runs BEFORE the upscale, where what it writes is an upscaler input
+// rather than the finished frame -- so its edit has to survive a temporal resolve before anyone sees
+// it, and it does not survive intact. Measured on a matched A/B capture, with the after-upscale
+// placement as the control for everything else the comparison could be picking up: the luminance of
+// the edit arrives at about 83% and its colour at about 48%, flat from a radius of 0 to a radius of
+// 64 display pixels. Flat is the part that says what this is. A blur, a resolution limit or a history
+// clamp all take fine detail before broad, so all three would show a gain climbing steeply with
+// radius. A gain that does not move with scale is a gain, and colour is being halved by one.
+//
+// So it is scaled back up here, and separately per component because the two are discarded at
+// different rates. This is compensation and not a cure -- the aligned part of the edit is what
+// scales, and some of what the upscaler does is a redirection rather than an attenuation -- but it is
+// measured rather than guessed, and both numbers are exposed so they can be checked by setting them
+// to 1.
+//
+// Zero reads as off. The constants are zero-initialised by every dispatch that does not fill them in,
+// and a gain of zero would delete the edit rather than leave it alone.
+float CompGain(float g) { return g > 1e-4 ? g : 1.0; }
 
 // The jitter as a UV offset, or zero when it is switched off.
 //
@@ -1013,6 +1036,24 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     if (gColourStrength > 1.0)
         result = ClampAp1(FromOkLab(float3(1.0, gColourStrength, gColourStrength) * ToOkLab(max(result, 0.0))));
+
+    // Put back what the upscaler downstream is going to take. Identity at the after-upscale placement,
+    // where there is no upscaler left to cross and both gains are set to 1.
+    {
+        const float gl = CompGain(gCompLuma);
+        const float gc = CompGain(gCompChroma);
+
+        if (gl != 1.0 || gc != 1.0)
+        {
+            const float3 edit = result - original;
+            const float editLuma = dot(edit, kLuma);
+
+            // Split rather than scaled whole, because the two halves are not discarded alike: scaling
+            // the edit by the colour gain would brighten it by the same factor, which is a different
+            // picture and not the one the pass composed.
+            result = original + editLuma * gl + (edit - editLuma) * gc;
+        }
+    }
 
     // Replace mode: the model's answer IS the picture, decoded through Neutwo's exact inverse, with
     // NONE of the composition above -- no ratio, no highlight guard, no palette blend. This is the

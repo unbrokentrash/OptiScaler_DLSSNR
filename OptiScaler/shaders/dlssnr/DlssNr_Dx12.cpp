@@ -2796,6 +2796,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.JitterX = frame.JitterX;
         resolveParams.JitterY = frame.JitterY;
         resolveParams.DejitterMode = dejitter;
+        // Pre-compensation for what the upscaler downstream discards. Identity in place, where the
+        // destination IS the finished frame and nothing follows the pass that could take any of it.
+        resolveParams.CompLuma = inPlace ? 1.0f : cfg.DlssNrCompLuma.value_or_default();
+        resolveParams.CompChroma = inPlace ? 1.0f : cfg.DlssNrCompChroma.value_or_default();
         resolveParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
         resolveParams.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
         resolveParams.DebugView = cfg.DlssNrDebugView.value_or_default();

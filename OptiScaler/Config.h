@@ -398,6 +398,14 @@ class Config
     // untouched whatever this is set to. 1.0 is full resolution and behaves exactly as before.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
 
+    // What the model's edit is scaled by before the upscaler downstream discards part of it. Applied
+    // only when the pass runs before the upscale, where its output is an upscaler input rather than the
+    // finished frame. The defaults are the measured inverses of what one A/B capture said survives --
+    // 83% of the luminance and 48% of the colour -- so 1.0 in both turns the compensation off and is
+    // how to check it.
+    CustomOptional<float> DlssNrCompLuma { 1.2f };
+    CustomOptional<float> DlssNrCompChroma { 2.05f };
+
     // Filter used for NR supersampling (working scale > 1): the model runs above native, and this is
     // the downscaler that averages its answer back to native. Independent of OutputScalingDownscaler
     // so NR and Output Scaling can run different filters at once. Lanczos3 is the sharp default.

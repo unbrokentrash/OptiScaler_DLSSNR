@@ -202,6 +202,16 @@ struct alignas(256) DlssNrConstants
     // sign of the jitter is the game's to choose and getting it wrong doubles the error rather than
     // removing it -- so it is settled by measurement rather than by assumption.
     uint32_t DejitterMode;
+
+    // What the edit is multiplied by before an upscaler downstream gets to discard some of it, split
+    // because luminance and colour are not discarded at the same rate. Only meaningful before the
+    // upscale; 1 (and 0, which is what an unfilled dispatch leaves here) means no compensation.
+    //
+    // Measured, not guessed. On a matched A/B capture with the after-upscale placement as the control,
+    // the pass's edit reaches the screen at 83% of its luminance and 48% of its colour, and the loss
+    // does not vary with spatial scale -- so it is a gain, and this is its inverse.
+    float CompLuma;
+    float CompChroma;
 };
 
 class DlssNr_Common

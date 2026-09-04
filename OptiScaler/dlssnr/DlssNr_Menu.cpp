@@ -151,6 +151,46 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nOnly the model's input and its answer are resampled -- the frame underneath is"
                        "\nnever touched. Meaningless after the upscale, where the jitter is already gone.");
 
+        // Beside the de-jitter for the same reason: it exists only because there is an upscaler after
+        // the pass, and it is dimmed rather than hidden on the other side so its irrelevance there is
+        // visible instead of mysterious.
+        {
+            const bool before = config->DlssNrBeforeUpscale.value_or_default();
+            ImGui::BeginDisabled(!before);
+
+            float compLuma = config->DlssNrCompLuma.value_or_default();
+            float compChroma = config->DlssNrCompChroma.value_or_default();
+
+            ImGui::PushItemWidth(220.0f * menuResScale);
+
+            if (ImGui::SliderFloat("Recover brightness", &compLuma, 1.0f, 3.0f, "%.2fx"))
+                config->DlssNrCompLuma = compLuma;
+
+            if (ImGui::SliderFloat("Recover colour", &compChroma, 1.0f, 4.0f, "%.2fx"))
+                config->DlssNrCompChroma = compChroma;
+
+            ImGui::PopItemWidth();
+            ImGui::EndDisabled();
+        }
+
+        HelpMarker("Scales the model's edit up before the upscaler downstream discards part of it."
+                       "\n\nRunning before the upscale, what this pass writes is an upscaler input rather"
+                       "\nthan the finished frame, so its edit has to survive a temporal resolve before"
+                       "\nanyone sees it -- and it does not survive whole. Measured on a matched A/B"
+                       "\ncapture, with the after-upscale placement as the control for everything else the"
+                       "\ncomparison could be picking up: the luminance of the edit reaches the screen at"
+                       "\nabout 83% of what the pass composed, and its COLOUR at about 48%."
+                       "\n\nThe loss does not change with spatial scale -- the same fraction goes at a"
+                       "\nradius of 64 pixels as at a radius of 0 -- which is what says it is a gain and"
+                       "\nnot a blur, a resolution limit, or a history clamp. All three of those take fine"
+                       "\ndetail before broad. So the two halves are scaled back up separately, because"
+                       "\nthey are not discarded at the same rate."
+                       "\n\nThe defaults are those measurements inverted, on one scene in one game. Set"
+                       "\nboth to 1.00 to turn the compensation off, which is also how to see what it is"
+                       "\ndoing. Compensation rather than a cure: it scales the part of the edit that"
+                       "\nsurvives in the right direction, and some of what an upscaler does to colour is"
+                       "\nredirection rather than attenuation, which no gain can undo.");
+
         // The comparison this whole panel exists to enable, taken by the pass itself rather than by
         // two screenshots seconds apart.
         ImGui::Spacing();
