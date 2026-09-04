@@ -123,6 +123,20 @@ CalibrationReading Calibration();
 // Whether the model is loaded and running, for the overlay.
 bool IsRunning();
 
+// What the live feature is actually working at. Zeroes until it has been built.
+//
+// frame is the picture the pass composes onto -- the render raster before the upscale, the display
+// raster after it -- and model is what the model itself runs at, which is the frame times the model
+// resolution. Reported because the same percentage means different pixel counts on either side of the
+// placement toggle, and the menu is where someone aiming for a particular size has to be told.
+struct NrSizes
+{
+    unsigned int frameWidth = 0, frameHeight = 0;
+    unsigned int modelWidth = 0, modelHeight = 0;
+};
+
+NrSizes Sizes();
+
 // Why it is not, if it is not. Empty while it is running or has not been tried yet.
 const char* FailureReason();
 

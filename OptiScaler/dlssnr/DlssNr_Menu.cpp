@@ -381,6 +381,19 @@ void RenderMenu(Config* config, float menuResScale)
             pendingScale = -1;
         }
 
+        // What the percentage above actually came out as, from the live feature. The same number means
+        // different pixel counts on either side of the placement toggle -- it is a fraction of the
+        // render raster before the upscale and of the display raster after it -- so someone aiming at
+        // a particular size was being asked to do that arithmetic in their head and to get the
+        // placement right in it.
+        {
+            const auto sizes = DlssNr::Sizes();
+
+            if (sizes.modelWidth != 0 && sizes.frameWidth != 0)
+                ImGui::TextDisabled("The model is working at %ux%u, on a %ux%u frame.", sizes.modelWidth,
+                                    sizes.modelHeight, sizes.frameWidth, sizes.frameHeight);
+        }
+
         if (scalePercent > 100)
             ImGui::TextDisabled("Supersampling %.2fx: the model runs ABOVE native, then\n"
                                 "is sampled back down. Experimental, and costly -- time grows with the area.",

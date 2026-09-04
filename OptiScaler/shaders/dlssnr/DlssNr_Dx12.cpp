@@ -3518,6 +3518,26 @@ CalibrationReading Calibration()
 
 bool IsRunning() { return g_nr.feature != nullptr && !g_nr.failed; }
 
+// The two sizes that decide what the model costs and what it is shown, as the live feature actually
+// has them rather than as the config implies.
+//
+// Model resolution is a percentage of a frame whose size depends on where the pass is placed -- the
+// render raster before the upscale, the display raster after it -- so the same number means different
+// pixel counts on either side of that toggle, and neither is written down anywhere the user can see.
+// Aiming the control at a particular size meant doing that arithmetic by hand, and getting the
+// placement wrong in it produced a setting that looked right and was not.
+NrSizes Sizes()
+{
+    std::lock_guard<std::mutex> nrLock(g_nrMutex);
+
+    NrSizes s {};
+    s.frameWidth = g_nr.width;
+    s.frameHeight = g_nr.height;
+    s.modelWidth = g_nr.workWidth;
+    s.modelHeight = g_nr.workHeight;
+    return s;
+}
+
 const char* FailureReason() { return g_nr.failed ? g_nr.reason : ""; }
 
 // What the game offers by way of exposure, and what has been read from it. For the menu, so a user
