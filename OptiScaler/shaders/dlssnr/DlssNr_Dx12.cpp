@@ -1237,6 +1237,13 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
 // allowRenderTarget is for the texture handed to the upscaler in place of the game's colour: the
 // upscaler transitions a colour buffer out of whatever state the game left it in, and in an Unreal
 // title that state is RENDER_TARGET. A texture created without the flag cannot legally be in it.
+// The format the model's surfaces actually ended up with, taken from the one that was created first
+// so a driver refusal propagates to the rest instead of leaving a mismatched set.
+DXGI_FORMAT ProxyFormatOf(ID3D12Resource* built, DXGI_FORMAT fallback)
+{
+    return built != nullptr ? built->GetDesc().Format : fallback;
+}
+
 ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width,
                               unsigned int height, bool allowRenderTarget = false)
 {
@@ -2241,7 +2248,49 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const unsigned int feedHeight =
         (modelUpscale && g_nr.builtScaled && g_nr.builtInHeight != 0) ? g_nr.builtInHeight : workHeight;
 
-    ReleaseSurfacesIfFormatChanged(desc.Format);
+    // Hoisted: the surfaces below are formatted from this, and they are allocated long before the
+    // colour transform is reported. Both halves have to agree -- the caller says what the game intends,
+    // the format says what the surface can actually hold.
+    const bool gameSaysHdr = frame.ColourIsLinearHdr;
+    const bool isHdrBuffer = gameSaysHdr && FormatCanHoldLinearHdr(desc.Format);
+
+    // What the model reads and writes, which need not be what the game's frame is stored in.
+    //
+    // Every scratch surface has always inherited the game's format, and for a linear HDR game that is
+    // four half floats -- eight bytes a pixel. But the picture the model is shown is not the frame: the
+    // encode ends in LinearToSrgb, which saturates, so the proxy is display-referred and provably
+    // inside [0,1]. The model's answer comes back in that same space. Eight bytes a pixel is being
+    // spent on data that fits in four.
+    //
+    // At 3440x1440 that is forty megabytes in and forty out, every frame, for the model alone. Halving
+    // it is the one lever left that does not take pixels away from the model or hand it a worse
+    // picture -- and at twelve milliseconds a megapixel, bandwidth is a plausible share of the cost.
+    //
+    // R11G11B10_FLOAT rather than a packed integer format: it is unambiguously usable as an unordered
+    // access view, it is float so the encode's curve needs no rescaling, and its range is positive
+    // which is exactly what a [0,1] proxy needs. What it gives up is alpha and some mantissa -- five to
+    // six bits a channel against ten. The reversible modes already force alpha opaque, and whether the
+    // mantissa costs anything visible is the trade this is a setting for.
+    //
+    // Only when the frame is linear HDR. A passthrough frame is written to the proxy RAW, so it is not
+    // bounded by anything and packing it would clip.
+    const bool wantCompact = cfg.DlssNrCompactProxy.value_or_default() && isHdrBuffer &&
+                             desc.Format != DXGI_FORMAT_R11G11B10_FLOAT;
+    const DXGI_FORMAT proxyFormat = wantCompact ? DXGI_FORMAT_R11G11B10_FLOAT : desc.Format;
+
+    {
+        static DXGI_FORMAT saidProxy = DXGI_FORMAT_UNKNOWN;
+
+        if (saidProxy != proxyFormat)
+        {
+            saidProxy = proxyFormat;
+            LOG_INFO("DLSS-NR surfaces: the game's frame is format {}, the model reads and writes {}"
+                     "{}", (int) desc.Format, (int) proxyFormat,
+                     wantCompact ? " (compact: half the bytes per pixel)" : "");
+        }
+    }
+
+    ReleaseSurfacesIfFormatChanged(proxyFormat);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
                                    g_nr.workWidth != workWidth || g_nr.workHeight != workHeight ||
@@ -2315,15 +2364,27 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // caller that parks one surface cannot silently drop two others.
     if (g_nr.output == nullptr)
     {
-        g_nr.output = CreateScratch(device, desc.Format, answerWidth, answerHeight);
+        g_nr.output = CreateScratch(device, proxyFormat, answerWidth, answerHeight);
+
+        // A compact surface the driver will not give us is not worth losing the pass over.
+        if (g_nr.output == nullptr && proxyFormat != desc.Format)
+        {
+            LOG_WARN("DLSS-NR: format {} refused for the model's surfaces, using the game's {}",
+                     (int) proxyFormat, (int) desc.Format);
+            g_nr.output = CreateScratch(device, desc.Format, answerWidth, answerHeight);
+        }
+
         g_nr.workWidth = workWidth;
         g_nr.workHeight = workHeight;
     }
 
     if (g_nr.colorCopy == nullptr)
-        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
+        g_nr.colorCopy = CreateScratch(device, ProxyFormatOf(g_nr.output, desc.Format), width, height);
 
     if (g_nr.hdrCopy == nullptr)
+        // NOT the compact format. This is the frame as it arrived -- open-ended linear light, not the
+        // encoded proxy -- and the composition adds the edit back onto it. Packing it would clip every
+        // highlight in the picture the player actually sees.
         g_nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
 
     // The size the model is fed can change once it has been built -- it publishes its own ratio, which
@@ -2337,7 +2398,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     if (reduced && g_nr.colorSmall == nullptr)
-        g_nr.colorSmall = CreateScratch(device, desc.Format, feedWidth, feedHeight);
+        g_nr.colorSmall =
+            CreateScratch(device, ProxyFormatOf(g_nr.output, desc.Format), feedWidth, feedHeight);
 
     // The accumulation, at the frame's size, built only when it is asked for -- two full surfaces is
     // not a cost to pay for a feature that is off.
@@ -2349,7 +2411,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             if (a == nullptr)
             {
-                a = CreateScratch(device, desc.Format, width, height);
+                a = CreateScratch(device, ProxyFormatOf(g_nr.output, desc.Format), width, height);
                 g_nr.accumValid = false;
             }
         }
@@ -2357,7 +2419,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // The down-leg target is native (the answer is brought back to frame size before the resolve).
     if (workScale > 1.0f && g_nr.outputNative == nullptr)
-        g_nr.outputNative = CreateScratch(device, desc.Format, width, height);
+        g_nr.outputNative =
+            CreateScratch(device, ProxyFormatOf(g_nr.output, desc.Format), width, height);
 
     if (g_nr.meter == nullptr)
     {
@@ -2565,9 +2628,6 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Both have to agree: the caller says what the game intends, the format says what the surface can
     // actually hold. A game that claims HDR while rendering into eight bits gets its frame encoded
     // twice otherwise.
-    const bool gameSaysHdr = frame.ColourIsLinearHdr;
-    const bool isHdrBuffer = gameSaysHdr && FormatCanHoldLinearHdr(desc.Format);
-
     static bool reportedHdr = false;
 
     if (!reportedHdr)

@@ -428,6 +428,30 @@ void RenderMenu(Config* config, float menuResScale)
             pendingScale = -1;
         }
 
+        {
+            bool compact = config->DlssNrCompactProxy.value_or_default();
+            if (ImGui::Checkbox("Compact model surfaces", &compact))
+                config->DlssNrCompactProxy = compact;
+        }
+
+        HelpMarker("Halves the bytes the model reads and writes, without taking any pixels away from"
+                       "\nit and without changing the picture it is shown."
+                       "\n\nThe pass has always given the model surfaces in the GAME'S format -- four"
+                       "\nhalf floats for a linear HDR title, eight bytes a pixel. But the picture the"
+                       "\nmodel reads is not the frame: the encode ends in an sRGB curve, which"
+                       "\nsaturates, so the proxy and the model's answer are both inside 0..1 and fit in"
+                       "\nfour bytes. At 3440x1440 that is forty megabytes in and forty out, every"
+                       "\nframe, for the model alone."
+                       "\n\nSo this is the one saving that costs no pixels and no input quality. Whether"
+                       "\nit costs TIME depends on how much of the model's cost is bandwidth -- watch the"
+                       "\nmodel figure in the timing above, which is what it is there for."
+                       "\n\nWhat it gives up: five to six mantissa bits a channel instead of ten, and the"
+                       "\nalpha, which the reversible modes already force opaque. The frame the player"
+                       "\nsees is never packed -- only the model's own surfaces are, never the untouched"
+                       "\ncopy the edit is composed onto."
+                       "\n\nLinear HDR games only; a frame that is already tone mapped is written to the"
+                       "\nproxy raw and packing it would clip. Rebuilds the surfaces when toggled.");
+
         // Beside the resolution slider, because it changes what that slider MEANS: with this on it
         // stops being how much of the model's contribution to compute and becomes a real input
         // resolution, with the model itself doing the enlarging.

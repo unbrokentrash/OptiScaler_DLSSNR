@@ -428,6 +428,18 @@ class Config
     // Feature 18 takes a frame at one size and returns one at another -- NVIDIA's own addon carries
     // InputWidth, OutputWidth, Upscaling and ScalingRatio, and this project's forwarder already reads
     // the scaling ratio through the model's own callback. This switches that on.
+    // Give the model half-size pixels for the picture it actually reads.
+    //
+    // Every scratch surface has always inherited the game's format -- four half floats for a linear HDR
+    // game, eight bytes a pixel. But the encode ends in LinearToSrgb, which saturates, so the proxy the
+    // model reads and the answer it writes are both inside [0,1] and fit in four. At 3440x1440 that is
+    // forty megabytes each way per frame for the model alone.
+    //
+    // The frame the player sees is untouched: only the model's own surfaces change, never the kept
+    // copy the edit is composed onto. Costs five to six mantissa bits a channel and the alpha, which is
+    // why it is a setting rather than the default.
+    CustomOptional<bool> DlssNrCompactProxy { false };
+
     CustomOptional<bool> DlssNrModelUpscale { false };
 
     CustomOptional<uint32_t> DlssNrInputAccum { 0 };

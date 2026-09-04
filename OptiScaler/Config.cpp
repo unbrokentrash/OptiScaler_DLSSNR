@@ -337,6 +337,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
+            DlssNrCompactProxy.set_from_config(readBool("DlssNr", "CompactProxy"));
             DlssNrModelUpscale.set_from_config(readBool("DlssNr", "ModelUpscale"));
             DlssNrInputAccum.set_from_config(readUInt("DlssNr", "InputAccum"));
             DlssNrInputAccumAlpha.set_from_config(readFloat("DlssNr", "InputAccumAlpha"));
@@ -1245,6 +1246,8 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "TagScale",
                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WorkingScale", GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CompactProxy",
+                 GetBoolValue(Instance()->DlssNrCompactProxy.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ModelUpscale",
                  GetBoolValue(Instance()->DlssNrModelUpscale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "InputAccum",
