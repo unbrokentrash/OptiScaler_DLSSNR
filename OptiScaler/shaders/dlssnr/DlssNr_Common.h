@@ -20,7 +20,8 @@ enum DlssNrMode : uint32_t
     DlssNrMode_Resolve = 1,    // proxy + the model's answer + the untouched copy -> the edited frame
     DlssNrMode_Downsample = 2, // the proxy -> a smaller proxy, when the model works below full size
     DlssNrMode_Meter = 3,      // the exposure texture -> tile (0,0), for the white point
-    DlssNrMode_Calibrate = 4   // the untouched frame -> a grid of tile peak luminances
+    DlssNrMode_Calibrate = 4,  // the untouched frame -> a grid of tile peak luminances
+    DlssNrMode_Accumulate = 5  // the de-jittered proxy + last frame's accumulation -> this frame's
 };
 
 // The meter's grid. 64 x 64 tiles over the whole frame, whatever its size.
@@ -212,6 +213,15 @@ struct alignas(256) DlssNrConstants
     // does not vary with spatial scale -- so it is a gain, and this is its inverse.
     float CompLuma;
     float CompChroma;
+
+    // How much of the current frame enters the accumulated input the model is shown, and which way the
+    // game's motion vectors point. Zero alpha and zero mode mean the accumulation is not running.
+    //
+    // This is what actually resolves the jitter. De-jitter alone moves the sampling grid onto the pixel
+    // centres and adds nothing; averaging successive frames, each jittered differently, recovers detail
+    // no single frame holds. The frame handed to the upscaler is untouched either way.
+    float AccumAlpha;
+    uint32_t AccumMv;
 };
 
 class DlssNr_Common

@@ -417,6 +417,14 @@ class Config
     // vectors and copes, which it can only do by rescaling from the MVec subrect itself. A factor
     // applied by the caller on top of that is counted twice, which is what the comment where this
     // value is stored has said all along.
+    // Resolve the jitter out of the model's input by averaging frames, rather than only shifting the
+    // sampling grid. 0 off, 1 reproject by subtracting the motion vector, 2 by adding it -- the sign is
+    // the game's to choose. Only meaningful before the upscale, where the frame is still jittered.
+    CustomOptional<uint32_t> DlssNrInputAccum { 0 };
+
+    // How much of the current frame enters that average. Lower resolves more and lags more.
+    CustomOptional<float> DlssNrInputAccumAlpha { 0.15f };
+
     CustomOptional<uint32_t> DlssNrMvScaleMode { 0 };
 
     CustomOptional<float> DlssNrCompLuma { 1.0f };

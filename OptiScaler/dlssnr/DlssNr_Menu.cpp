@@ -151,6 +151,55 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nOnly the model's input and its answer are resampled -- the frame underneath is"
                        "\nnever touched. Meaningless after the upscale, where the jitter is already gone.");
 
+        // Beside the de-jitter because it is the other half of the same job: de-jitter places each
+        // frame's sample on the pixel grid, this averages those samples into a picture.
+        {
+            const bool before = config->DlssNrBeforeUpscale.value_or_default();
+            ImGui::BeginDisabled(!before);
+
+            static const char* accumNames[] = { "Off", "On (subtract vectors)", "On (add vectors)" };
+            int accum = (int) config->DlssNrInputAccum.value_or_default();
+
+            if (accum < 0 || accum >= IM_ARRAYSIZE(accumNames))
+                accum = 0;
+
+            ImGui::PushItemWidth(220.0f * menuResScale);
+
+            if (ImGui::Combo("Resolve the jitter", &accum, accumNames, IM_ARRAYSIZE(accumNames)))
+                config->DlssNrInputAccum = (uint32_t) accum;
+
+            if (accum != 0)
+            {
+                float alpha = config->DlssNrInputAccumAlpha.value_or_default();
+
+                if (ImGui::SliderFloat("New frame weight", &alpha, 0.02f, 1.0f, "%.2f"))
+                    config->DlssNrInputAccumAlpha = alpha;
+            }
+
+            ImGui::PopItemWidth();
+            ImGui::EndDisabled();
+        }
+
+        HelpMarker("Builds the picture the model is shown out of SEVERAL frames instead of one."
+                       "\n\nThis is what actually removes the jitter, and de-jitter on its own never"
+                       "\ncould: shifting the sampling grid onto the pixel centres adds no information"
+                       "\nthe frame did not already have, which is why it changed nothing. The upscaler"
+                       "\noffsets the camera differently every frame, so successive frames carry"
+                       "\nDIFFERENT sub-pixel samples of the same scene -- averaging them recovers"
+                       "\ndetail no single frame holds. Use both: de-jitter places each sample, this"
+                       "\naverages them."
+                       "\n\nThe frame the UPSCALER gets is untouched. Only the model's input is built"
+                       "\nthis way, and its edit is put back onto the original, still-jittered frame --"
+                       "\nso the upscaler still receives the jittered input its own accumulation needs."
+                       "\n\nTwo directions because the sign of the game's motion vectors is the game's"
+                       "\nto choose. The wrong one reprojects backwards and smears badly, so it should"
+                       "\nbe obvious which is which while the camera moves."
+                       "\n\nNew frame weight is how much of the current frame enters the average. Lower"
+                       "\nresolves more and lags more; 1.00 is the same as off. History that disagrees"
+                       "\nwith what this frame shows nearby is rejected, which is what stops it"
+                       "\nghosting behind moving objects."
+                       "\n\nExperimental, and off by default.");
+
         // Beside the de-jitter for the same reason: it exists only because there is an upscaler after
         // the pass, and it is dimmed rather than hidden on the other side so its irrelevance there is
         // visible instead of mysterious.

@@ -258,6 +258,13 @@ struct NrState
     // downscaler that does it. With superUp this lands the super-native answer at native for a 1:1
     // composite (no aliased minify). nrScaler is the filter both were built with, so a changed
     // DlssNrScalingDownscaler rebuilds them.
+    // The accumulated input the model is shown, ping-ponged: one is read as last frame's, the other
+    // written as this frame's. accumValid says whether the read one holds anything yet, so the first
+    // frame after a reset or a resize shows the model the plain proxy rather than a black texture.
+    ID3D12Resource* accum[2] = { nullptr, nullptr };
+    unsigned int accumIndex = 0;
+    bool accumValid = false;
+
     ID3D12Resource* outputNative = nullptr;
     OS_Dx12* superDown = nullptr;
     Scaler nrScaler = Scaler::Count;
@@ -2150,6 +2157,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.hdrCopy);
             ParkNrResource(g_nr.colorSmall);
             ParkNrResource(g_nr.outputNative);
+            ParkNrResource(g_nr.accum[0]);
+            ParkNrResource(g_nr.accum[1]);
+            g_nr.accumValid = false;
         }
     }
 
@@ -2164,6 +2174,22 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+
+    // The accumulation, at the frame's size, built only when it is asked for -- two full surfaces is
+    // not a cost to pay for a feature that is off.
+    const unsigned int accumMode = inPlace ? 0u : cfg.DlssNrInputAccum.value_or_default();
+
+    if (accumMode != 0)
+    {
+        for (ID3D12Resource*& a : g_nr.accum)
+        {
+            if (a == nullptr)
+            {
+                a = CreateScratch(device, desc.Format, width, height);
+                g_nr.accumValid = false;
+            }
+        }
+    }
 
     // The down-leg target is native (the answer is brought back to frame size before the resolve).
     if (workScale > 1.0f && g_nr.outputNative == nullptr)
@@ -2547,7 +2573,84 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
     // enlarged during the resolve while the frame underneath stays full size and untouched.
+    // Acquired here rather than after the reduction below, because the accumulation reprojects with
+    // the vectors and has to run before the model's input is finalised. They are typed clones of the
+    // game's own resources and depend on nothing the encode produced, so the move costs nothing.
+    ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
+    ID3D12Resource* motionIn = ReadableGuide(device, cmdList, motion, &g_nr.motionClone);
+
+    if (depthIn == nullptr || motionIn == nullptr)
+    {
+        g_nr.failed = true;
+        g_nr.reason = "the game's depth or motion vectors could not be made readable";
+        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
+        device->Release();
+        return false;
+    }
+
+    ID3D12Resource* accumulatedInput = nullptr;
     ID3D12Resource* modelInput = g_nr.colorCopy;
+
+    // Resolve the jitter, by averaging frames rather than by shifting the sampling grid.
+    //
+    // De-jitter puts the current frame's sample on the pixel centre and stops there, which adds nothing
+    // -- a resampled aliased picture is still aliased, and that is why it changed nothing on its own.
+    // The upscaler offsets the camera differently every frame, so successive frames hold DIFFERENT
+    // sub-pixel samples of the same scene; averaging them recovers detail no one frame has. That is
+    // what the reference implementation's author described as the requirement for running the model
+    // before the upscale, and it is the half that was missing.
+    //
+    // The two work together: de-jitter places each sample, this accumulates them. Neither is much use
+    // without the other.
+    //
+    // What the upscaler receives is untouched throughout. Only the model's input is built this way, and
+    // the composition puts the model's edit back through JitterUv() onto the original, still-jittered
+    // frame -- so the upscaler still gets the jittered input its own accumulation needs.
+    if (accumMode != 0 && g_nr.accum[0] != nullptr && g_nr.accum[1] != nullptr)
+    {
+        ID3D12Resource* prev = g_nr.accum[g_nr.accumIndex];
+        ID3D12Resource* next = g_nr.accum[g_nr.accumIndex ^ 1u];
+
+        DlssNrConstants accumParams {};
+        accumParams.Mode = DlssNrMode_Accumulate;
+        accumParams.Width = width;
+        accumParams.Height = height;
+        accumParams.GuideWidth = guideWidth;
+        accumParams.GuideHeight = guideHeight;
+        accumParams.MvScaleX = g_nr.guideMvScaleX;
+        accumParams.MvScaleY = g_nr.guideMvScaleY;
+        accumParams.AccumMv = accumMode;
+
+        // A reset, or the first frame on a new pair of surfaces, has no history to reproject: take the
+        // current frame whole rather than blending it with whatever the memory happened to hold.
+        accumParams.AccumAlpha = g_nr.accumValid
+                                     ? std::clamp(cfg.DlssNrInputAccumAlpha.value_or_default(), 0.02f, 1.0f)
+                                     : 1.0f;
+
+        Barrier(cmdList, prev, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        DispatchPass(cmdList, accumParams, g_nr.colorCopy, prev, nullptr, motionIn, nullptr, next,
+                     nullptr);
+
+        Barrier(cmdList, prev, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(cmdList, next, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        g_nr.accumIndex ^= 1u;
+
+        // A reset means the scene it accumulated is gone. Cleared here rather than next frame so the
+        // frame after a cut starts from the current picture instead of reprojecting the old one.
+        g_nr.accumValid = !g_nr.reset;
+
+        // What the model is shown, and therefore what the composition has to treat as the proxy: the
+        // edit is the difference between the model's answer and the picture it was given, so comparing
+        // it against anything else would fold the accumulation itself into the edit.
+        modelInput = next;
+        accumulatedInput = next;
+    }
 
     if (reduced && g_nr.colorSmall != nullptr)
     {
@@ -2614,19 +2717,6 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // Read the exposure scan's candidates on the pass's own command list, once a frame.
     DlssNr::ExposureScan::Tick(device, cmdList);
-
-    ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
-    ID3D12Resource* motionIn = ReadableGuide(device, cmdList, motion, &g_nr.motionClone);
-
-    if (depthIn == nullptr || motionIn == nullptr)
-    {
-        g_nr.failed = true;
-        g_nr.reason = "the game's depth or motion vectors could not be made readable";
-        LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
-        device->Release();
-        return false;
-    }
 
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
     // The motion-vector scale, and an honest account of why there is a setting here.
@@ -2945,7 +3035,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             superDownOk = true;
         }
 
-        ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : modelInput;
+        // The proxy the composition compares against has to be the picture the model was actually
+        // shown -- the edit is the difference between its answer and its input, so comparing against
+        // anything else folds that difference into the edit. With the accumulation running, that is
+        // the accumulated frame and not the encode's plain proxy.
+        ID3D12Resource* resolveProxy = accumulatedInput != nullptr ? accumulatedInput
+                                       : superDownOk               ? g_nr.colorCopy
+                                                                   : modelInput;
         ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : g_nr.output;
 
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
@@ -3532,6 +3628,17 @@ void Shutdown()
         g_nr.output->Release();
         g_nr.output = nullptr;
     }
+
+    for (ID3D12Resource*& a : g_nr.accum)
+    {
+        if (a != nullptr)
+        {
+            a->Release();
+            a = nullptr;
+        }
+    }
+
+    g_nr.accumValid = false;
 
     if (g_nr.colorCopy != nullptr)
     {

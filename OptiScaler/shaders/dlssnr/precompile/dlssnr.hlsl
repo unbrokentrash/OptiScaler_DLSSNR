@@ -34,6 +34,8 @@ cbuffer Params : register(b0)
     uint  gDejitterMode;   // 0 off, 1 subtract it from what the model is shown, 2 add it
     float gCompLuma;       // pre-compensation for what the upscaler discards: 1 (or 0) is off
     float gCompChroma;
+    float gAccumAlpha;     // how much of the current frame enters the accumulated input, 0..1
+    uint  gAccumMv;        // reprojection sign: 1 subtract the vector, 2 add it
 };
 
 // How much the edit is boosted before an upscaler gets to eat some of it.
@@ -550,6 +552,83 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // nothing about scale; the peak says where the top of the range is, which is exactly what the
     // divisor has to match. One specular hit cannot decide the answer because the host takes a
     // percentile across tiles afterwards.
+    // Accumulate: resolve the jitter out of what the model is shown, by averaging frames.
+    //
+    // De-jitter alone never could. It samples the frame shifted by the jitter offset, which moves the
+    // sampling grid onto the pixel centres but adds no information the frame did not already have --
+    // a resampled aliased picture is an aliased picture. That is why it changed nothing. What resolves
+    // jitter is the thing the upscaler itself does: the camera is offset by a different fraction of a
+    // pixel every frame, so successive frames carry DIFFERENT sub-pixel samples of the same scene, and
+    // averaging them recovers detail no single frame holds.
+    //
+    // Only the model's input is built this way. The frame the upscaler receives is never touched -- the
+    // composition puts the model's edit back through JitterUv() onto the untouched, still-jittered
+    // original, so the upscaler still gets the jittered input its own accumulation needs. That is the
+    // "put the jitter back for SR" half, and it was already right; this is the half that was missing.
+    //
+    //   gSource   the de-jittered proxy for this frame
+    //   gModel    the accumulation as it stood last frame
+    //   gMotion   the game's vectors, for reprojecting it
+    //   gTarget   the accumulation for this frame, which is what the model is shown
+    if (gMode == 5)
+    {
+        const float3 current = gSource.Load(int3(id.xy, 0)).rgb;
+        const float alpha = clamp(gAccumAlpha, 0.02, 1.0);
+
+        // The neighbourhood the history is allowed to be in, taken from THIS frame. Reprojection is
+        // approximate and the vectors describe surfaces, not disocclusions -- so behind a moving
+        // object the history points at something that is no longer there. Clamping to what the current
+        // frame actually shows nearby is what stops that arriving as a smear. Standard TAA, and the
+        // reason a naive average ghosts.
+        float3 lo = current;
+        float3 hi = current;
+
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const int2 at = clamp(int2(id.xy) + int2(dx, dy), int2(0, 0),
+                                      int2((int) gWidth - 1, (int) gHeight - 1));
+                const float3 n = gSource.Load(int3(at, 0)).rgb;
+                lo = min(lo, n);
+                hi = max(hi, n);
+            }
+        }
+
+        // Where this pixel was last frame. The vectors are the game's own, in its own units, scaled by
+        // what it reported -- gMvScale turns them into pixels of this dispatch. Their sign is the
+        // game's to choose, which is why there are two modes rather than an assumption.
+        // Read within the guide's valid region rather than across the whole texture: a dynamic
+        // resolution game allocates its vectors once at the largest size it will ever need and renders
+        // into the corner, so the texture is bigger than the picture and a plain uv would read the
+        // stale margin. The same reasoning the host already applies when it bounds the subrect.
+        uint mvW, mvH;
+        gMotion.GetDimensions(mvW, mvH);
+
+        const float2 mvRegion = (mvW > 0u && mvH > 0u && gGuideWidth > 0u && gGuideHeight > 0u)
+                                    ? float2((float) gGuideWidth / (float) mvW,
+                                             (float) gGuideHeight / (float) mvH)
+                                    : float2(1.0, 1.0);
+
+        const float2 mv = gMotion.SampleLevel(gLinear, uv * mvRegion, 0).xy;
+        const float2 mvPixels = mv * float2(gMvScaleX, gMvScaleY);
+        const float2 step = mvPixels / float2(max(gWidth, 1u), max(gHeight, 1u));
+        const float2 prevUv = gAccumMv == 2 ? uv + step : uv - step;
+
+        float3 blended = current;
+
+        // Off the edge there is no history, so the current frame is the whole answer rather than a
+        // clamped sample of the border smeared inward.
+        if (prevUv.x >= 0.0 && prevUv.x <= 1.0 && prevUv.y >= 0.0 && prevUv.y <= 1.0)
+        {
+            const float3 history = clamp(gModel.SampleLevel(gLinear, prevUv, 0).rgb, lo, hi);
+            blended = lerp(history, current, alpha);
+        }
+
+        gTarget[id.xy] = float4(max(blended, float3(0.0, 0.0, 0.0)), 1.0);
+        return;
+    }
+
     if (gMode == 4)
     {
         uint fullW, fullH;
