@@ -2937,6 +2937,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         //
         // Built lazily here rather than beside the supersample pair, because that branch only runs
         // above 1.0 and this leg is needed below it.
+        //
+        // The filter choice is coarser going up than coming down: OS_Dx12 selects EASU when the scaler
+        // is FSR1 and its bicubic upsampler for everything else, so the Lanczos and Kaiser options only
+        // separate on the down-leg. Both are far better than the bilinear tap this replaces, and FSR1
+        // is the one that is edge-adaptive.
         bool answerUpOk = false;
 
         if (workScale < 1.0f && g_nr.outputNative != nullptr)
