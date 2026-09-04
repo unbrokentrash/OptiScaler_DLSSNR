@@ -153,6 +153,9 @@ ExposureStatus GameExposureStatus();
 // What the pass last cost on the GPU, in milliseconds, or nothing if it has not been measured yet.
 std::optional<double> LastGpuTime();
 
+// What the model's own evaluate cost, as opposed to the whole pass. Empty until the query ring fills.
+std::optional<double> LastNgxTime();
+
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
 
 

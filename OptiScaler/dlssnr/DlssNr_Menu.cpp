@@ -372,7 +372,17 @@ void RenderMenu(Config* config, float menuResScale)
             const char* runSuffix =
                 !config->DlssNrApplyModel.value_or_default() ? "  (model running, edit hidden)" : "";
 
-            if (ms.has_value())
+            // Split into the model and everything around it. "It costs 60 ms" is not actionable; "52 of
+            // those 60 are the model" says the ceiling is the model, and "14 of them are ours" says
+            // there is something here worth attacking. The numbers were always measured and only ever
+            // written to a log file that is off by default.
+            const auto ngxMs = vulkan ? std::optional<double>() : DlssNr::LastNgxTime();
+
+            if (ms.has_value() && ngxMs.has_value() && ms.value() > 0.0)
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                   "Running - %.2f ms per frame (model %.2f, this pass %.2f)%s",
+                                   ms.value(), ngxMs.value(), ms.value() - ngxMs.value(), runSuffix);
+            else if (ms.has_value())
                 ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Running%s - %.2f ms per frame%s",
                                    vulkan ? " natively on Vulkan" : "", ms.value(), runSuffix);
             else if (vulkan)

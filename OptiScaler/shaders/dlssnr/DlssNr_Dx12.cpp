@@ -3920,6 +3920,14 @@ ExposureStatus GameExposureStatus()
 
 std::optional<double> LastGpuTime() { return g_lastGpuTime; }
 
+// The model's own evaluate, separately from the passes around it.
+//
+// Both have been measured since before this branch; only the total was ever shown, and only to a log
+// that is off by default. The difference is the question anyone asking "why does this cost 60 ms"
+// needs answered first: what the model costs is the model's, and what the encode, the meter and the
+// resolve cost at display resolution is ours and might be worth attacking.
+std::optional<double> LastNgxTime() { return g_lastNgxTime; }
+
 
 
 void RequestCapture(unsigned int frames)
