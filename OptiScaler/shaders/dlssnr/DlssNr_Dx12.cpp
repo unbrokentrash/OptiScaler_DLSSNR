@@ -2134,8 +2134,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     //
     // Only below native: above it the model is already supersampling and there is nothing to upscale.
     // Needs the forwarder to know how, which is resolved by name, so an older one simply reports no.
+    // scaledRefused belongs in here, not only at the create. The output surface is sized from this and
+    // allocated BEFORE the feature is built, so if the two disagree the model is created at one size
+    // and handed a destination of another -- which the evaluate rejects, and a rejected evaluate
+    // disables the pass for the whole session. That is the shape of "the model refused to run".
     const bool modelUpscale = cfg.DlssNrModelUpscale.value_or_default() && reduced && workScale < 1.0f &&
-                              g_nr.createScaled != nullptr && g_nr.evaluateScaled != nullptr;
+                              g_nr.createScaled != nullptr && g_nr.evaluateScaled != nullptr &&
+                              !g_nr.scaledRefused;
 
     // What the model writes into: the frame's size when it upscales, its own working size otherwise.
     const unsigned int answerWidth = modelUpscale ? width : workWidth;
@@ -2304,7 +2309,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // back already the right size and nothing downstream enlarges it.
         // Not retried once refused: the answer will not change between frames, and asking again every
         // rebuild would put a failed create in front of every successful one.
-        const bool wantScaled = modelUpscale && !g_nr.scaledRefused;
+        const bool wantScaled = modelUpscale;
 
         g_nr.builtScaledWanted = modelUpscale;
         g_nr.builtScaled = false;
@@ -2331,10 +2336,24 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
             else
             {
+                // The output was allocated at the frame's size for an upscaler that does not exist, so
+                // it goes back before anything is built against it. Nothing is created this frame: next
+                // frame modelUpscale is false, the surface comes back at the working size, and the
+                // ordinary create runs with the two agreeing.
                 g_nr.scaledRefused = true;
+                ParkNrResource(g_nr.output);
+
                 LOG_WARN("DLSS-NR: the model refused to be built as an upscaler ({}x{} -> {}x{}), "
-                         "falling back to same-size (create 0x{:X})", workWidth, workHeight, width,
-                         height, (unsigned int) (g_nr.lastCreate != nullptr ? *g_nr.lastCreate : 0));
+                         "falling back to same-size next frame (create 0x{:X})", workWidth, workHeight,
+                         width, height,
+                         (unsigned int) (g_nr.lastCreate != nullptr ? *g_nr.lastCreate : 0));
+
+                // Put the destination back the way the caller expects to find it before leaving. The
+                // other exits from this block predate the entry barrier above them and do not, which
+                // is worth fixing separately rather than copying.
+                Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
+                device->Release();
+                return false;
             }
         }
 
@@ -3211,6 +3230,20 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_ab.recordSeam(cmdList, device, g_nr.hdrCopy,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+    else if (g_nr.builtScaled)
+    {
+        // An upscaling evaluate that fails is a statement about the upscaling, not about the pass. It
+        // used to disable Neural Rendering for the rest of the session -- which is a heavy price for
+        // an experiment that is off by default, and is what a tester saw as "the model refused to run"
+        // after ticking one box. Now the request is withdrawn and the feature rebuilt without it.
+        g_nr.scaledRefused = true;
+        ParkNrFeature(g_nr.feature);
+        ParkNrResource(g_nr.output);
+
+        LOG_WARN("DLSS-NR: the model built as an upscaler but would not evaluate as one "
+                 "(0x{:X}, {}), giving up on upscaling and rebuilding at the working size",
+                 (uint32_t) result, NgxResultName((unsigned int) result));
     }
     else
     {
