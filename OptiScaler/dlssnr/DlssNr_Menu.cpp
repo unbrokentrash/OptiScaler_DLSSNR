@@ -457,6 +457,19 @@ void RenderMenu(Config* config, float menuResScale)
             {
                 ImGui::TextDisabled("The model published no scaling ratios -- it may not upscale at all.");
             }
+
+            // The measured case, and the one worth naming rather than leaving to be inferred from six
+            // identical numbers.
+            bool anyBelowOne = false;
+
+            for (float r : sizes.ratios)
+            {
+                if (r > 0.0f && r < 0.999f)
+                    anyBelowOne = true;
+            }
+
+            if (sizes.ratiosKnown && !anyBelowOne)
+                ImGui::TextDisabled("All 1:1 -- this model does NOT upscale, so the box above does nothing.");
         }
 
         HelpMarker("Hands the model a small frame and asks it for a large one, instead of running it"

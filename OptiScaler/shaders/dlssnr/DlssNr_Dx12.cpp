@@ -723,6 +723,28 @@ void ReportScalingRatios()
 // upscaling is computed from a PerfQualityValue, so the ratio is the model's to choose and ours only
 // to select from. This turns "I want 0.5" into "the preset you call Performance", which is the form
 // the question has to be in.
+// Whether the model offers ANY ratio below 1:1 -- that is, whether it upscales at all.
+//
+// Measured, and the answer is no. Asked what it wants to run at for each of its six quality levels,
+// this snippet answers 1.0000 for five of them and refuses the sixth. There is no performance mode
+// hiding behind the parameter names: DLSSNR.Upscaling, InputWidth and OutputWidth are in its
+// vocabulary, the create accepts them without complaint, and the evaluate then returns
+// FAIL_InvalidParameter -- which is exactly what a model that has no scaling ratio to compute would
+// do. The names existing is not the capability existing.
+bool ModelOffersUpscaling()
+{
+    if (!g_nr.ratiosKnown)
+        return false;
+
+    for (float r : g_nr.ratios)
+    {
+        if (r > 0.0f && r < 0.999f)
+            return true;
+    }
+
+    return false;
+}
+
 int NearestQuality(float wanted, float* got)
 {
     if (!g_nr.ratiosKnown)
@@ -2187,9 +2209,24 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // allocated BEFORE the feature is built, so if the two disagree the model is created at one size
     // and handed a destination of another -- which the evaluate rejects, and a rejected evaluate
     // disables the pass for the whole session. That is the shape of "the model refused to run".
+    // Not attempted when the model has already said it does not upscale. Asking anyway costs a create
+    // the model accepts, an evaluate it rejects with FAIL_InvalidParameter, and a rebuild -- every time
+    // the box is ticked -- to arrive at an answer its own callback gave before any of that.
     const bool modelUpscale = cfg.DlssNrModelUpscale.value_or_default() && reduced && workScale < 1.0f &&
                               g_nr.createScaled != nullptr && g_nr.evaluateScaled != nullptr &&
-                              !g_nr.scaledRefused;
+                              ModelOffersUpscaling() && !g_nr.scaledRefused;
+
+    if (cfg.DlssNrModelUpscale.value_or_default() && !ModelOffersUpscaling())
+    {
+        static bool saidNoUpscaling = false;
+
+        if (!saidNoUpscaling)
+        {
+            saidNoUpscaling = true;
+            LOG_INFO("DLSS-NR: the model reports a 1:1 ratio at every quality level, so it does not "
+                     "upscale -- the request is not being made");
+        }
+    }
 
     // What the model writes into: the frame's size when it upscales, its own working size otherwise.
     const unsigned int answerWidth = modelUpscale ? width : workWidth;
