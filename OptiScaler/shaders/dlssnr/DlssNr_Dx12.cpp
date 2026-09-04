@@ -260,6 +260,11 @@ struct NrState
     // DlssNrScalingDownscaler rebuilds them.
     ID3D12Resource* outputNative = nullptr;
     OS_Dx12* superDown = nullptr;
+
+    // The mirror of superDown for the other direction: below native the model's answer is SMALLER than
+    // the frame and has to be enlarged before the composite, and the resolve's own SampleLevel is a
+    // single bilinear tap. answerUp lands it at native with the chosen filter instead.
+    OS_Dx12* answerUp = nullptr;
     Scaler nrScaler = Scaler::Count;
 
     // Frame hold (design/frame-hold.md): a persistent copy of the output taken on hold-on and restored
@@ -2165,8 +2170,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (reduced && g_nr.colorSmall == nullptr)
         g_nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
 
-    // The down-leg target is native (the answer is brought back to frame size before the resolve).
-    if (workScale > 1.0f && g_nr.outputNative == nullptr)
+    // The answer at frame size, for either direction: the down-leg brings a super-native answer back to
+    // it, the up-leg brings a reduced one up to it. Both exist so the resolve composites 1:1 against
+    // the native proxy rather than resampling inside the composition.
+    if (reduced && g_nr.outputNative == nullptr)
         g_nr.outputNative = CreateScratch(device, desc.Format, width, height);
 
     if (g_nr.meter == nullptr)
@@ -2568,6 +2575,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             {
                 if (g_nr.superUp != nullptr)   { delete g_nr.superUp;   g_nr.superUp = nullptr; }
                 if (g_nr.superDown != nullptr) { delete g_nr.superDown; g_nr.superDown = nullptr; }
+                if (g_nr.answerUp != nullptr)  { delete g_nr.answerUp;  g_nr.answerUp = nullptr; }
                 g_nr.nrScaler = nrScaler;
             }
             if (g_nr.superUp == nullptr)
@@ -2913,8 +2921,65 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             superDownOk = true;
         }
 
-        ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : modelInput;
-        ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : g_nr.output;
+        // Reduction up-leg, and the reason it exists is the same sentence as the down-leg above with the
+        // direction reversed. Below native the model's answer is SMALLER than the frame, and the only
+        // thing enlarging it was the resolve's own SampleLevel -- one bilinear tap. That is the blur
+        // reported at every setting under 100%, and it is also where the instability comes from: a
+        // bilinear magnification slides sub-pixel with the scene, so the enlarged answer shimmers on
+        // geometry that is not moving. A real filter does not.
+        //
+        // It is also what made the two placements incomparable at the same model resolution. Running
+        // before the upscale, the model's answer is composed at render resolution 1:1 and the UPSCALER
+        // enlarges the finished frame -- so the enlargement is DLSS's, and it is good. Running after
+        // the upscale with the slider down, the same-sized answer was magnified by that single tap
+        // instead. Same model, same pixels, entirely different enlargement, which is exactly the
+        // difference reported between them.
+        //
+        // Built lazily here rather than beside the supersample pair, because that branch only runs
+        // above 1.0 and this leg is needed below it.
+        bool answerUpOk = false;
+
+        if (workScale < 1.0f && g_nr.outputNative != nullptr)
+        {
+            const Scaler nrScaler = cfg.DlssNrScalingDownscaler.value_or_default();
+
+            if (g_nr.nrScaler != nrScaler)
+            {
+                if (g_nr.superUp != nullptr)   { delete g_nr.superUp;   g_nr.superUp = nullptr; }
+                if (g_nr.superDown != nullptr) { delete g_nr.superDown; g_nr.superDown = nullptr; }
+                if (g_nr.answerUp != nullptr)  { delete g_nr.answerUp;  g_nr.answerUp = nullptr; }
+                g_nr.nrScaler = nrScaler;
+            }
+
+            if (g_nr.answerUp == nullptr)
+                g_nr.answerUp = new OS_Dx12("DLSS-NR reduction up", device, true, nrScaler);
+
+            if (g_nr.answerUp != nullptr && g_nr.answerUp->Dispatch(cmdList, g_nr.output, g_nr.outputNative))
+            {
+                Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                answerUpOk = true;
+            }
+            else
+            {
+                // Worth saying once. The fallback is the old path, which is not broken -- only soft --
+                // so this is a quality notice rather than a failure.
+                static bool warnedUp = false;
+
+                if (!warnedUp)
+                {
+                    warnedUp = true;
+                    LOG_WARN("DLSS-NR: no upscaler for the reduced model's answer, falling back to a "
+                             "bilinear enlarge in the resolve.");
+                }
+            }
+        }
+
+        // Either leg lands the answer at frame size, and the encode already wrote the proxy there, so
+        // the composition gets a 1:1 pair and does no resampling of its own.
+        const bool nativePair = superDownOk || answerUpOk;
+        ID3D12Resource* resolveProxy = nativePair ? g_nr.colorCopy : modelInput;
+        ID3D12Resource* resolveAnswer = nativePair ? g_nr.outputNative : g_nr.output;
 
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
                             exposureTex, target, nullptr);
@@ -2922,7 +2987,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        if (superDownOk)
+        // Either leg left it readable; both have to put it back as the UAV the next dispatch expects.
+        if (nativePair)
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -3538,6 +3604,12 @@ void Shutdown()
     {
         delete g_nr.superUp;
         g_nr.superUp = nullptr;
+    }
+
+    if (g_nr.answerUp != nullptr)
+    {
+        delete g_nr.answerUp;
+        g_nr.answerUp = nullptr;
     }
 
     if (g_nr.superDown != nullptr)
