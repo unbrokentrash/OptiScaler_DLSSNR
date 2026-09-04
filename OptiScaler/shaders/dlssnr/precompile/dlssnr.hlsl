@@ -783,7 +783,23 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // What the model is shown, which may be shifted back onto the pixel grid. Off, this is the
         // load above and the path is byte-identical.
         if (gDejitterMode != 0)
-            frame = max(gSource.SampleLevel(gLinear, uv + JitterUv(), 0).rgb, float3(0.0, 0.0, 0.0));
+        {
+            // uv is normalised over the DISPATCH, which is the render rect, while the sample reads the
+            // whole source texture. Before the upscale that source is the game's own colour buffer, and
+            // a dynamic-resolution title allocates one at the largest size it will ever need and renders
+            // into the corner -- so the two are not the same rectangle and a plain uv reads across the
+            // stale margin. Scaled into the valid region, the way the accumulation reads its vectors
+            // and the way the host already bounds the guides.
+            uint srcW, srcH;
+            gSource.GetDimensions(srcW, srcH);
+
+            const float2 region = (srcW > 0u && srcH > 0u)
+                                      ? float2((float) gWidth / (float) srcW, (float) gHeight / (float) srcH)
+                                      : float2(1.0, 1.0);
+
+            frame = max(gSource.SampleLevel(gLinear, (uv + JitterUv()) * region, 0).rgb,
+                        float3(0.0, 0.0, 0.0));
+        }
 
         // Some games hand DLSS a frame that has already been through their tonemapper. The game says
         // which in its own DLSS creation flags, and converting one that needs no conversion is pure

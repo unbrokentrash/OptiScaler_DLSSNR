@@ -2185,6 +2185,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     {
         g_nr.failed = true;
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return false;
     }
@@ -2307,14 +2308,23 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
+    // Each surface guarded on its own, not on the output's. These used to be allocated together on the
+    // strength of `output == nullptr`, which is true whenever ANYTHING parked the output alone -- and
+    // the upscaling refusal paths do exactly that. The two survivors were then overwritten while still
+    // held, leaking a full-resolution texture each. Guarding each one makes the block idempotent, so a
+    // caller that parks one surface cannot silently drop two others.
     if (g_nr.output == nullptr)
     {
         g_nr.output = CreateScratch(device, desc.Format, answerWidth, answerHeight);
-        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
-        g_nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
         g_nr.workWidth = workWidth;
         g_nr.workHeight = workHeight;
     }
+
+    if (g_nr.colorCopy == nullptr)
+        g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
+
+    if (g_nr.hdrCopy == nullptr)
+        g_nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
 
     // The size the model is fed can change once it has been built -- it publishes its own ratio, which
     // need not be the slider's -- so the surface is checked against it rather than only against null.
@@ -2395,6 +2405,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.failed = true;
             g_nr.reason = "nvngx_dlssnr.dll was not found beside OptiScaler or the game";
             LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
             device->Release();
             return false;
         }
@@ -2519,6 +2530,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             // 0x-452FFFFF, which no one can decode back to 0xBAD00001.
             LOG_ERROR("DLSS-NR create failed: init 0x{:X} ({}), create 0x{:X} ({})", initResult,
                       NgxResultName(initResult), createResult, NgxResultName(createResult));
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
             device->Release();
             return false;
         }
@@ -2533,12 +2545,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Creating and evaluating a feature in the same command list is the dice-roll that hung the
         // GPU (every crash died on a creation frame). The creation goes through the game's own submit
         // first; the first evaluate happens next frame. One frame without the model is invisible.
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return false;
     }
 
     if (g_nr.feature == nullptr)
     {
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return false;
     }
@@ -2571,6 +2585,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.failed = true;
         g_nr.reason = "the colour codec would not compile";
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return false;
     }
@@ -2619,6 +2634,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // The device reference taken at the top of this function is released on every other path out.
         // It was not released here, and this is the one path a bindless game takes every single frame
         // -- so the game that most needed this skip was also leaking a device reference per frame.
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return false;
     }
@@ -2855,7 +2871,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return false;
     }
 
-    ID3D12Resource* accumulatedInput = nullptr;
+    ID3D12Resource* accumHeld = nullptr;
     ID3D12Resource* modelInput = g_nr.colorCopy;
 
     // Resolve the jitter, by averaging frames rather than by shifting the sampling grid.
@@ -2890,7 +2906,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         // A reset, or the first frame on a new pair of surfaces, has no history to reproject: take the
         // current frame whole rather than blending it with whatever the memory happened to hold.
-        accumParams.AccumAlpha = g_nr.accumValid
+        // g_nr.reset belongs in here, not only after the dispatch. Clearing it afterwards meant the cut
+        // frame itself still blended history from before the cut, and only the frame after it started
+        // clean -- one frame of the old scene reprojected onto the new one, which is the frame most
+        // likely to be looked at.
+        const bool haveHistory = g_nr.accumValid && !g_nr.reset;
+
+        accumParams.AccumAlpha = haveHistory
                                      ? std::clamp(cfg.DlssNrInputAccumAlpha.value_or_default(), 0.02f, 1.0f)
                                      : 1.0f;
 
@@ -2907,15 +2929,23 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         g_nr.accumIndex ^= 1u;
 
-        // A reset means the scene it accumulated is gone. Cleared here rather than next frame so the
-        // frame after a cut starts from the current picture instead of reprojecting the old one.
-        g_nr.accumValid = !g_nr.reset;
+        // Valid unconditionally now: a frame taken whole because there was no history IS the history
+        // from here on. The reset is handled above, where it can still affect this frame.
+        g_nr.accumValid = true;
 
-        // What the model is shown, and therefore what the composition has to treat as the proxy: the
-        // edit is the difference between the model's answer and the picture it was given, so comparing
-        // it against anything else would fold the accumulation itself into the edit.
+        // What the model is shown. resolveProxy already follows modelInput, so nothing else needs to
+        // know: an earlier version overrode the proxy with THIS surface, which was wrong the moment the
+        // model resolution dropped below 100% -- the reduction below then fed the model colorSmall
+        // while the composition compared against the full-size accumulation, so modelRanSmall read
+        // false, matched residual switched itself off, and the downsample's blur was folded into the
+        // edit as though the model had made it.
         modelInput = next;
-        accumulatedInput = next;
+
+        // Held only so its resource state can be put back at the end. It is left readable for the rest
+        // of the frame -- the model reads it, then the composition does -- and the ping-pong means this
+        // same surface is the one barriered FROM unordered access next frame, so leaving it readable
+        // made every frame after the first submit a transition from a state it was not in.
+        accumHeld = next;
     }
 
     if (reduced && g_nr.colorSmall != nullptr)
@@ -3322,11 +3352,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // the accumulated frame and not the encode's plain proxy.
         // When the model upscaled, its answer is a full-resolution reconstruction rather than an
         // enlargement of a downsample, so pairing it with the full-resolution proxy is legitimate --
-        // which is exactly what it is not when a small answer is merely stretched.
-        ID3D12Resource* resolveProxy = g_nr.builtScaled       ? g_nr.colorCopy
-                                       : accumulatedInput != nullptr ? accumulatedInput
-                                       : superDownOk               ? g_nr.colorCopy
-                                                                   : modelInput;
+        // which is exactly what it is not when a small answer is merely stretched. Otherwise the proxy
+        // is simply whatever the model was fed, which is what modelInput already is.
+        ID3D12Resource* resolveProxy = (g_nr.builtScaled || superDownOk) ? g_nr.colorCopy : modelInput;
         ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : g_nr.output;
 
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
@@ -3450,6 +3478,13 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Leave the staging copy as the next frame expects to find it.
+    // The accumulation the model read is put back as the unordered access its own next dispatch will
+    // barrier away from. Without this the ping-pong hands the same surface to Barrier() as UAV while it
+    // is actually readable, which is an invalid transition submitted on every frame the feature is on.
+    if (accumHeld != nullptr)
+        Barrier(cmdList, accumHeld, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
     Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
