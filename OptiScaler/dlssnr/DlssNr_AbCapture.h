@@ -243,6 +243,7 @@ struct Handoff
     unsigned int modelWidth = 0, modelHeight = 0;   // what it is asked to work at
 
     bool depthInverted = false;
+    bool depthInvertedOverridden = false;
     float mvScaleX = 0.0f, mvScaleY = 0.0f;         // as handed to the model, after any working scale
     bool reset = false;
     float jitterX = 0.0f, jitterY = 0.0f;           // the camera offset, in render pixels
@@ -634,7 +635,10 @@ class AbCapture
         std::fprintf(f, "frame shown    %ux%u\n", h.frameWidth, h.frameHeight);
         std::fprintf(f, "model works at %ux%u\n\n", h.modelWidth, h.modelHeight);
 
-        std::fprintf(f, "depth inverted %s\n", h.depthInverted ? "yes" : "no");
+        // Whether it came from the game or from the user matters: "no" from a game that simply never
+        // set the flag is the common case, and is worth telling apart from "no" that somebody chose.
+        std::fprintf(f, "depth inverted %s  (%s)\n", h.depthInverted ? "yes" : "no",
+                     h.depthInvertedOverridden ? "your override" : "the game's DLSS create flag");
         std::fprintf(f, "mv scale       %.4f x %.4f  (as handed over)\n", h.mvScaleX, h.mvScaleY);
         std::fprintf(f, "history reset  %s\n", h.reset ? "yes" : "no");
         std::fprintf(f, "jitter         %+.4f, %+.4f pixels   de-jitter %s\n", h.jitterX, h.jitterY,

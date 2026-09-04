@@ -1540,7 +1540,25 @@ void ReadFrameInfo(NVSDK_NGX_Parameter* params, DlssNrFrameInfo& frame)
     unsigned int createFlags = 0;
     params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
 
-    frame.DepthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
+    // The user's override first, exactly as IFeature does it for the upscalers, and the game's own
+    // flag only when there is no override.
+    //
+    // This pass read the flag and nothing else, so OptiScaler's Depth Inverted checkbox -- which
+    // exists precisely because games get this wrong or never set it -- reached every upscaler in the
+    // tree and not the model. Reversed-Z is near universal in modern engines while the DLSS flag that
+    // declares it often is not set, so "not inverted" is the answer this returns for a great many
+    // games whose depth is in fact inverted.
+    //
+    // What that costs the model is not symmetric between the two placements, which is why it is worth
+    // being able to correct. The model reprojects its own temporal state with the depth and vectors it
+    // is handed; running after the upscale it is shown a frame the upscaler has already resolved, so a
+    // reprojection that lands wrong costs it comparatively little. Running before the upscale the
+    // frame it is shown is raw, and its own history is the only thing it has to steady it.
+    if (Config::Instance()->DepthInverted.has_value())
+        frame.DepthInverted = Config::Instance()->DepthInverted.value();
+    else
+        frame.DepthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
+
     frame.ColourIsLinearHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
 
     // The game telling the upscaler to forget everything it has accumulated: a cut, a teleport, a
@@ -2695,6 +2713,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         h.modelHeight = workHeight;
 
         h.depthInverted = g_nr.guideDepthInverted;
+        h.depthInvertedOverridden = Config::Instance()->DepthInverted.has_value();
         h.mvScaleX = g_nr.guideMvScaleX * mvToWork;
         h.mvScaleY = g_nr.guideMvScaleY * mvToWork;
         h.reset = resetThisFrame;
