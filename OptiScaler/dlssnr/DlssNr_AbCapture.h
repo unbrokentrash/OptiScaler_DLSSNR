@@ -308,6 +308,23 @@ class AbCapture
             handoff_ = h;
     }
 
+    // What the model was ACTUALLY shown -- the proxy, after the encode's curve and after whatever the
+    // de-jitter or the accumulation did to it.
+    //
+    // Missing until now, and its absence was misleading rather than merely incomplete. 3_seam_before is
+    // the KEEP, which the encode deliberately never de-jitters because the edit has to land back on the
+    // frame exactly as it arrived. So the shot labelled "what the pass was shown" was the one picture
+    // guaranteed NOT to show what the model was given, and anyone judging an input-side setting from it
+    // was reading a frame that setting cannot touch.
+    void recordModelInput(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* shown,
+                          D3D12_RESOURCE_STATES shownState)
+    {
+        if (stage_ != Stage::AppliedFrame || shown == nullptr)
+            return;
+
+        takeShot(cmd, device, shown, shownState, modelInput_);
+    }
+
     // The frame either side of the resolve, within one evaluate. Exactly the same frame.
     void recordSeam(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* clean,
                     D3D12_RESOURCE_STATES cleanState, ID3D12Resource* edited,
@@ -400,6 +417,7 @@ class AbCapture
         any |= dump(dir / "2_with_nr.png", withNr_, divisor);
         any |= dump(dir / "3_seam_before.png", seamBefore_, divisor);
         any |= dump(dir / "4_seam_after.png", seamAfter_, divisor);
+        any |= dump(dir / "5_model_input.png", modelInput_, divisor);
 
         writeNote(dir, whitePoint, passthrough, beforeUpscale, settle_);
         release();
@@ -409,7 +427,7 @@ class AbCapture
 
     void release()
     {
-        for (Shot* s : { &noNr_, &withNr_, &seamBefore_, &seamAfter_ })
+        for (Shot* s : { &noNr_, &withNr_, &seamBefore_, &seamAfter_, &modelInput_ })
         {
             if (s->readback != nullptr)
                 s->readback->Release();
@@ -587,8 +605,15 @@ class AbCapture
 
         std::fprintf(f, "1_no_nr.png      the finished frame with the model's edit held back\n");
         std::fprintf(f, "2_with_nr.png    the finished frame with it applied, the very next frame\n");
-        std::fprintf(f, "3_seam_before.png  what the pass was shown\n");
-        std::fprintf(f, "4_seam_after.png   what it produced -- the SAME frame as 3, exactly\n\n");
+        std::fprintf(f, "3_seam_before.png  the frame as it arrived, before the resolve\n");
+        std::fprintf(f, "4_seam_after.png   what it produced -- the SAME frame as 3, exactly\n");
+        std::fprintf(f, "5_model_input.png  what the MODEL was shown\n\n");
+
+        std::fprintf(f, "3 is not 5, and the difference matters. 3 is the untouched frame the encode\n"
+                        "kept, which is deliberately never de-jittered because the edit has to land\n"
+                        "back on the picture exactly as it arrived. 5 is the proxy the model actually\n"
+                        "reads: the encode's curve, plus whatever de-jitter or the accumulation did.\n"
+                        "An input-side setting can only ever show up in 5.\n\n");
 
         std::fprintf(f, "3 and 4 are one frame, copied either side of the resolve, so nothing at all\n"
                         "differs between them but the edit. That is the pair to read when asking\n"
@@ -673,6 +698,7 @@ class AbCapture
     Shot withNr_ {};
     Shot seamBefore_ {};
     Shot seamAfter_ {};
+    Shot modelInput_ {};
 
     Stage stage_ = Stage::Idle;
     int drain_ = 0;

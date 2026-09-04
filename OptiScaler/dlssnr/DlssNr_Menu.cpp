@@ -137,8 +137,21 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::EndDisabled();
         }
 
-        HelpMarker("Puts the frame back on the pixel grid before the model sees it, and puts its answer"
-                       "\nback where the jitter actually is on the way out."
+        HelpMarker("SUPERSEDED by \"Resolve the jitter\", which turns this off when it runs. Kept because"
+                       "\nit is how the finding below is reproduced, not because it is worth using."
+                       "\n\nIt does not remove jitter and it costs sharpness. Shifting the sampling grid"
+                       "\nonto the pixel centres adds no information the frame did not already have -- a"
+                       "\nresampled aliased picture is still aliased -- and it takes one bilinear tap in"
+                       "\nthe encode plus a second in the resolve, where the model's answer is read at a"
+                       "\nfractional offset to put it back. With this off that read lands exactly on"
+                       "\ntexel centres and interpolates nothing. So it softens the edit twice and"
+                       "\nresolves nothing, which is why it reads as a blur filter."
+                       "\n\nIt also defeats the accumulation: averaging frames recovers detail BECAUSE"
+                       "\neach frame samples a different sub-pixel position, and shifting them all to"
+                       "\nthe same one first leaves nothing to average."
+                       "\n\nThe original intent, for the record:"
+                       "\n\nPuts the frame back on the pixel grid before the model sees it, and puts its"
+                       "\nanswer back where the jitter actually is on the way out."
                        "\n\nThe upscaler offsets the camera a fraction of a pixel every frame, and the"
                        "\nmotion vectors do not carry that offset -- the upscaler applies it itself. A"
                        "\nmodel that carries temporal state and reprojects with those vectors finds its"

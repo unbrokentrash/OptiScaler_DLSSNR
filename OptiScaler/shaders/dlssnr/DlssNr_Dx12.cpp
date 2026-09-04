@@ -2547,8 +2547,24 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // of it by the upscaler, so there is nothing to undo and the offset would be in the wrong units
     // anyway -- the jitter is in render pixels and that frame is display sized. The after-upscale path
     // stays byte-identical.
+    // De-jitter, and why the accumulation switches it off rather than adding to it.
+    //
+    // Shifting each frame's sample onto the pixel grid is precisely what destroys the thing the
+    // accumulation lives on. Averaging frames recovers sub-pixel detail BECAUSE each frame's sample
+    // sits at a different sub-pixel position; resample them all to the same position first and every
+    // frame contributes the same bilinear estimate, so the average gains nothing and keeps the blur.
+    //
+    // And the blur is real on its own account. The shift costs one bilinear tap in the encode, and the
+    // resolve reads both the proxy and the model's answer at cmpUv - JitterUv() to put the answer back
+    // -- which at a fractional offset is a second bilinear tap, this time over the model's output. With
+    // it off, that same read lands exactly on texel centres and interpolates nothing. So the setting
+    // adds no information, as measured, and softens the edit twice, which is what the tester saw when
+    // they described it as a blur filter.
+    //
+    // Left reachable rather than deleted, because it costs nothing to keep and is how that finding is
+    // reproduced. But it is superseded, and the accumulation refuses to run alongside it.
     const unsigned int dejitter =
-        inPlace ? 0u : cfg.DlssNrDejitter.value_or_default();
+        (inPlace || accumMode != 0) ? 0u : cfg.DlssNrDejitter.value_or_default();
 
     encodeParams.JitterX = frame.JitterX;
     encodeParams.JitterY = frame.JitterY;
@@ -3072,6 +3088,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // the destination now holds the edit, so nothing between them differs but the model.
         g_lastWhitePoint = whitePoint;
         g_lastPassthrough = !isHdrBuffer;
+
+        // And the picture the model actually read, which is none of the four the capture used to write.
+        // Every candidate for it is a shader resource at this point in the frame.
+        if (g_ab.wantSeam())
+            g_ab.recordModelInput(cmdList, device, modelInput,
+                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         if (g_ab.wantSeam())
             g_ab.recordSeam(cmdList, device, g_nr.hdrCopy,
