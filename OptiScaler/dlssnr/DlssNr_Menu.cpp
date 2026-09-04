@@ -695,7 +695,12 @@ void RenderMenu(Config* config, float menuResScale)
                    "\ntonal balance closer to what the game rendered."
                    "\n\nCinematic: tones down the shine and over-processing for a film-like look."
                    "\n\nRead when the model is built, so a change rebuilds it after a moment. The"
-                   "\nnames come from community testing; NVIDIA ships no names in the binaries.");
+                   "\nnames come from community testing; NVIDIA ships no names in the binaries."
+                   "\n\nMay also change what it COSTS. NVIDIA's own ReShade addon labels these three"
+                   "\n\"Model A\", \"Model B\" and \"Model C\" rather than styles, which reads like three"
+                   "\nnetworks rather than three profiles of one -- and three networks need not be the"
+                   "\nsame size. Untested. The timing above splits the model's own cost from this"
+                   "\npass's, so switching between them says the answer directly.");
 
         DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
 
