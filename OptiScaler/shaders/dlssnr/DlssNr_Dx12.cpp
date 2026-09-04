@@ -157,6 +157,17 @@ using PFN_NrEvaluate = int(__cdecl*) (ID3D12GraphicsCommandList*, void*, void*, 
                                       ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, unsigned int,
                                       unsigned int, unsigned int, unsigned int, int, int, float, int,
                                       float, float, float, int, float, float);
+// The same two, with the input and the output as separate sizes -- the model's own upscaling. Resolved
+// by name so a forwarder that predates them is simply found not to have them.
+using PFN_NrCreateScaled = void*(__cdecl*) (const wchar_t*, const wchar_t*, ID3D12Device*,
+                                            ID3D12GraphicsCommandList*, void*, unsigned int, unsigned int,
+                                            unsigned int, unsigned int, int, float, int, float, float,
+                                            float, int, int);
+using PFN_NrEvaluateScaled = int(__cdecl*) (ID3D12GraphicsCommandList*, void*, void*, ID3D12Resource*,
+                                            ID3D12Resource*, ID3D12Resource*, ID3D12Resource*,
+                                            unsigned int, unsigned int, unsigned int, unsigned int,
+                                            unsigned int, unsigned int, int, int, float, int, float,
+                                            float, float, int, float, float);
 using PFN_NrRelease = void(__cdecl*) (void*);
 using PFN_NrSetExtras = void(__cdecl*) (void*, float, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*,
                                         unsigned int, unsigned int, unsigned int, unsigned int);
@@ -190,6 +201,14 @@ struct NrState
 {
     HMODULE forwarder = nullptr;
     PFN_NrCreate create = nullptr;
+    PFN_NrCreateScaled createScaled = nullptr;
+    PFN_NrEvaluateScaled evaluateScaled = nullptr;
+
+    // Whether the live feature was built to upscale, and at what size it takes its input. Recorded
+    // because it decides how the evaluate is called and what the composition may compare against.
+    bool builtScaled = false;
+    unsigned int builtInWidth = 0;
+    unsigned int builtInHeight = 0;
     PFN_NrEvaluate evaluate = nullptr;
     PFN_NrRelease release = nullptr;
     PFN_NrSetExtras setExtras = nullptr;
@@ -555,6 +574,9 @@ bool EnsureForwarder()
     g_nr.lastRatioStage = (const int*) GetProcAddress(g_nr.forwarder, "dlssnr_last_ratio_stage");
 
     g_nr.create = (PFN_NrCreate) GetProcAddress(g_nr.forwarder, "dlssnr_call_create");
+    g_nr.createScaled = (PFN_NrCreateScaled) GetProcAddress(g_nr.forwarder, "dlssnr_call_create_scaled");
+    g_nr.evaluateScaled =
+        (PFN_NrEvaluateScaled) GetProcAddress(g_nr.forwarder, "dlssnr_call_evaluate_scaled");
     g_nr.evaluate = (PFN_NrEvaluate) GetProcAddress(g_nr.forwarder, "dlssnr_call_evaluate");
     g_nr.release = (PFN_NrRelease) GetProcAddress(g_nr.forwarder, "dlssnr_call_release");
     // Optional: an older forwarder simply lacks it, and the model runs as before.
@@ -2098,10 +2120,23 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
 
+    // Whether the model itself does the enlarging, decided here because it changes how big its output
+    // surface has to be and that is allocated before the feature is built.
+    //
+    // Only below native: above it the model is already supersampling and there is nothing to upscale.
+    // Needs the forwarder to know how, which is resolved by name, so an older one simply reports no.
+    const bool modelUpscale = cfg.DlssNrModelUpscale.value_or_default() && reduced && workScale < 1.0f &&
+                              g_nr.createScaled != nullptr && g_nr.evaluateScaled != nullptr;
+
+    // What the model writes into: the frame's size when it upscales, its own working size otherwise.
+    const unsigned int answerWidth = modelUpscale ? width : workWidth;
+    const unsigned int answerHeight = modelUpscale ? height : workHeight;
+
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
-                                   g_nr.workWidth != workWidth || g_nr.workHeight != workHeight;
+                                   g_nr.workWidth != workWidth || g_nr.workHeight != workHeight ||
+                                   g_nr.builtScaled != modelUpscale;
 
     // The model reads its tuning once, while the feature is built, so a changed setting only takes
     // effect when the feature is rebuilt. TuningMatchesFeature was written to notice that and then
@@ -2165,7 +2200,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     if (g_nr.output == nullptr)
     {
-        g_nr.output = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.output = CreateScratch(device, desc.Format, answerWidth, answerHeight);
         g_nr.colorCopy = CreateScratch(device, desc.Format, width, height);
         g_nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
         g_nr.workWidth = workWidth;
@@ -2246,17 +2281,60 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
-        g_nr.feature =
-            g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                        device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
-                        (int) cfg.DlssNrPreset.value_or_default(),
-                        cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-                        cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-                        cfg.DlssNrSkinStructure.value_or_default(),
-                        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
-                        // UI correction at the model's own default: with no UI layer fed to it there
-                        // is nothing for it to correct.
-                        1);
+
+        // The model's own upscaling, when it is asked for and the model is not already at frame size.
+        //
+        // This is the capability the pass has been working around all along. Model resolution below
+        // 100% does NOT use it: it runs the model small and enlarges the EDIT, leaving the frame
+        // underneath untouched -- compositing, which is why its own help text talks about reducing the
+        // model's contribution rather than about resolution. The model itself takes a frame at one size
+        // and returns one at another, and nothing here had ever switched that on.
+        //
+        // Built with the input at the working size and the output at the frame's, so the answer comes
+        // back already the right size and nothing downstream enlarges it.
+        const bool wantScaled = modelUpscale;
+
+        g_nr.builtScaled = false;
+        g_nr.builtInWidth = workWidth;
+        g_nr.builtInHeight = workHeight;
+
+        if (wantScaled)
+        {
+            g_nr.feature = g_nr.createScaled(
+                snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device,
+                cmdList, g_nr.capabilityParams, workWidth, workHeight, width, height,
+                (int) cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
+                (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+                cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+
+            // Whether feature 18 accepts this at all is the question, so it is reported either way
+            // rather than only when it fails. A refusal falls back to the pass as it was.
+            if (g_nr.feature != nullptr)
+            {
+                g_nr.builtScaled = true;
+                LOG_INFO("DLSS-NR: the model is upscaling, {}x{} in -> {}x{} out", workWidth, workHeight,
+                         width, height);
+            }
+            else
+            {
+                LOG_WARN("DLSS-NR: the model refused to be built as an upscaler ({}x{} -> {}x{}), "
+                         "falling back to same-size", workWidth, workHeight, width, height);
+            }
+        }
+
+        if (g_nr.feature == nullptr)
+            g_nr.feature =
+                g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                            device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
+                            (int) cfg.DlssNrPreset.value_or_default(),
+                            cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                            cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                            cfg.DlssNrSkinStructure.value_or_default(),
+                            cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
+                            // UI correction at the model's own default: with no UI layer fed to it there
+                            // is nothing for it to correct.
+                            1);
 
         if (g_nr.feature == nullptr)
         {
@@ -2804,14 +2882,29 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // feature-creation hang, and the colour core is not settled enough to build on. One evaluate.
     const bool resetThisFrame = g_nr.reset;
 
-    const int result = g_nr.evaluate(
-        cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
-        workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
-        g_nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
-        (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
-        cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
-        cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
-        g_nr.guideMvScaleY * mvToWork);
+    // Two sizes when the feature was built to upscale, one when it was not. builtScaled rather than
+    // the setting, because the setting can move between a create and an evaluate and the feature is
+    // whatever it was actually built as.
+    const int result =
+        g_nr.builtScaled
+            ? g_nr.evaluateScaled(
+                  cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn,
+                  g_nr.output, g_nr.builtInWidth, g_nr.builtInHeight, width, height, guideWidth,
+                  guideHeight, g_nr.guideDepthInverted ? 1 : 0, g_nr.reset ? 1 : 0,
+                  cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                  cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                  cfg.DlssNrSkinStructure.value_or_default(),
+                  cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
+                  g_nr.guideMvScaleY * mvToWork)
+            : g_nr.evaluate(
+                  cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn,
+                  g_nr.output, workWidth, workHeight, guideWidth, guideHeight,
+                  g_nr.guideDepthInverted ? 1 : 0, g_nr.reset ? 1 : 0,
+                  cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                  cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                  cfg.DlssNrSkinStructure.value_or_default(),
+                  cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
+                  g_nr.guideMvScaleY * mvToWork);
 
     if (g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
@@ -3055,7 +3148,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // shown -- the edit is the difference between its answer and its input, so comparing against
         // anything else folds that difference into the edit. With the accumulation running, that is
         // the accumulated frame and not the encode's plain proxy.
-        ID3D12Resource* resolveProxy = accumulatedInput != nullptr ? accumulatedInput
+        // When the model upscaled, its answer is a full-resolution reconstruction rather than an
+        // enlargement of a downsample, so pairing it with the full-resolution proxy is legitimate --
+        // which is exactly what it is not when a small answer is merely stretched.
+        ID3D12Resource* resolveProxy = g_nr.builtScaled       ? g_nr.colorCopy
+                                       : accumulatedInput != nullptr ? accumulatedInput
                                        : superDownOk               ? g_nr.colorCopy
                                                                    : modelInput;
         ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : g_nr.output;

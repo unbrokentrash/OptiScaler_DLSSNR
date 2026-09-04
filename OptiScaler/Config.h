@@ -420,6 +420,16 @@ class Config
     // Resolve the jitter out of the model's input by averaging frames, rather than only shifting the
     // sampling grid. 0 off, 1 reproject by subtracting the motion vector, 2 by adding it -- the sign is
     // the game's to choose. Only meaningful before the upscale, where the frame is still jittered.
+    // Let the MODEL do the enlarging, instead of running it small and stretching its edit.
+    //
+    // Model resolution below 100% has never used the model's own upscaling: it runs the model at the
+    // reduced size and enlarges the EDIT, leaving the frame underneath untouched. That is compositing,
+    // which is why its help text talks about the model's contribution rather than about resolution.
+    // Feature 18 takes a frame at one size and returns one at another -- NVIDIA's own addon carries
+    // InputWidth, OutputWidth, Upscaling and ScalingRatio, and this project's forwarder already reads
+    // the scaling ratio through the model's own callback. This switches that on.
+    CustomOptional<bool> DlssNrModelUpscale { false };
+
     CustomOptional<uint32_t> DlssNrInputAccum { 0 };
 
     // How much of the current frame enters that average. Lower resolves more and lags more.

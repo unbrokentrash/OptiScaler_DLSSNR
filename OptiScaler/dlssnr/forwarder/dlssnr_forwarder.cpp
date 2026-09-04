@@ -843,6 +843,122 @@ __declspec(dllexport) int dlssnr_call_evaluate(ID3D12GraphicsCommandList *cmd, v
     return result;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The model's own upscaling.
+//
+// Feature 18 is not only a post-process. NVIDIA's own ReShade addon carries DLSSNR.InputWidth,
+// InputHeight, OutputWidth, OutputHeight, Upscaling and ScalingRatio in its binary, and this module
+// already reads the last of those through the snippet's own DLSSNRComputeScalingRatioCallback -- so
+// the model takes a frame at one size and returns one at another, and none of that was ever switched
+// on here. Everything above hands it a single resolution and gets the same resolution back.
+//
+// These two are that path. They are separate exports rather than extra parameters on the ones above
+// because a host resolving them by name can find out whether the forwarder beside it knows how, and
+// stand down when it does not, instead of calling through a signature that has quietly changed.
+//
+// Nothing else differs. Same feature id, same tuning, same subrect discipline -- the colour carries the
+// input's size and the output carries the output's, which is the same rule the guides already follow.
+
+static void setScalingParams(void *capabilityParams, unsigned int inW, unsigned int inH,
+                             unsigned int outW, unsigned int outH) {
+    setUInt(capabilityParams, "DLSSNR.Upscaling", 1);
+    setUInt(capabilityParams, "DLSSNR.InputWidth", inW);
+    setUInt(capabilityParams, "DLSSNR.InputHeight", inH);
+    setUInt(capabilityParams, "DLSSNR.OutputWidth", outW);
+    setUInt(capabilityParams, "DLSSNR.OutputHeight", outH);
+}
+
+__declspec(dllexport) int dlssnr_call_last_create_scaled = 0;
+
+__declspec(dllexport) void *dlssnr_call_create_scaled(const wchar_t *snippetPath, const wchar_t *dataPath,
+                                                      ID3D12Device *device, ID3D12GraphicsCommandList *cmd,
+                                                      void *capabilityParams, unsigned int inWidth,
+                                                      unsigned int inHeight, unsigned int outWidth,
+                                                      unsigned int outHeight, int preset, float intensity,
+                                                      int style, float localStructure, float localTone,
+                                                      float skinStructure, int useAutoMask,
+                                                      int uiCorrection) {
+    if (!capabilityParams) {
+        return nullptr;
+    }
+
+    // Set before the create below, which does not touch these and does not need to: the block belongs
+    // to the driver and outlives the call, so what is written here is still there when the feature is
+    // built. Width and Height stay the OUTPUT's, because that is the raster the model produces and the
+    // one everything downstream measures against.
+    setScalingParams(capabilityParams, inWidth, inHeight, outWidth, outHeight);
+
+    void *handle = dlssnr_call_create(snippetPath, dataPath, device, cmd, capabilityParams, outWidth,
+                                      outHeight, preset, intensity, style, localStructure, localTone,
+                                      skinStructure, useAutoMask, uiCorrection);
+
+    dlssnr_call_last_create_scaled = dlssnr_call_last_create;
+    return handle;
+}
+
+__declspec(dllexport) int dlssnr_call_evaluate_scaled(ID3D12GraphicsCommandList *cmd, void *feature,
+                                                      void *capabilityParams, ID3D12Resource *color,
+                                                      ID3D12Resource *depth, ID3D12Resource *motion,
+                                                      ID3D12Resource *output, unsigned int inWidth,
+                                                      unsigned int inHeight, unsigned int outWidth,
+                                                      unsigned int outHeight, unsigned int guideWidth,
+                                                      unsigned int guideHeight, int depthInverted,
+                                                      int reset, float intensity, int style,
+                                                      float localStructure, float localTone,
+                                                      float skinStructure, int useAutoMask,
+                                                      float mvScaleX, float mvScaleY) {
+    if (!feature || !capabilityParams || !g_snip.evaluate) {
+        return 0;
+    }
+
+    setResource(capabilityParams, "DLSSNR.Color", color);
+    setResource(capabilityParams, "DLSSNR.Depth", depth);
+    setResource(capabilityParams, "DLSSNR.MVec", motion);
+    setResource(capabilityParams, "DLSSNR.Output", output);
+
+    setUInt(capabilityParams, "DLSSNR.Enabled", 1);
+    setUInt(capabilityParams, "DLSSNR.Width", outWidth);
+    setUInt(capabilityParams, "DLSSNR.Height", outHeight);
+    setUInt(capabilityParams, "DLSSNR.DepthInverted", (unsigned int) depthInverted);
+    setUInt(capabilityParams, "DLSSNR.Reset", (unsigned int) reset);
+
+    setScalingParams(capabilityParams, inWidth, inHeight, outWidth, outHeight);
+
+    // The colour is the small picture and the output is the large one, so they no longer share a
+    // subrect. That split is the whole difference between this and the evaluate above.
+    setUInt(capabilityParams, "DLSSNR.ColorSubrectBaseX", 0);
+    setUInt(capabilityParams, "DLSSNR.ColorSubrectBaseY", 0);
+    setUInt(capabilityParams, "DLSSNR.ColorSubrectWidth", inWidth);
+    setUInt(capabilityParams, "DLSSNR.ColorSubrectHeight", inHeight);
+    setUInt(capabilityParams, "DLSSNR.OutputSubrectBaseX", 0);
+    setUInt(capabilityParams, "DLSSNR.OutputSubrectBaseY", 0);
+    setUInt(capabilityParams, "DLSSNR.OutputSubrectWidth", outWidth);
+    setUInt(capabilityParams, "DLSSNR.OutputSubrectHeight", outHeight);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", 0);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", 0);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectWidth", guideWidth);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectHeight", guideHeight);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", 0);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", 0);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", guideWidth);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", guideHeight);
+
+    setFloat(capabilityParams, "DLSSNR.MVecScaleX", mvScaleX);
+    setFloat(capabilityParams, "DLSSNR.MVecScaleY", mvScaleY);
+
+    setFloat(capabilityParams, "DLSSNR.Intensity", intensity);
+    setUInt(capabilityParams, "DLSSNR.Style", (unsigned int) style);
+    setFloat(capabilityParams, "DLSSNR.LocalStructureStrength", localStructure);
+    setFloat(capabilityParams, "DLSSNR.LocalToneStrength", localTone);
+    setFloat(capabilityParams, "DLSSNR.SkinStructureStrength", skinStructure);
+    setUInt(capabilityParams, "DLSSNR.UseAutoMask", (unsigned int) useAutoMask);
+
+    // Volatile for the same reason as above: a tail call leaves this module's frame behind and the
+    // snippet rejects the caller it then resolves to.
+    volatile int result = g_snip.evaluate(cmd, feature, capabilityParams, nullptr);
+    return result;
+}
+
 // Inputs NVIDIA's own Streamline plugin sets that the positional exports predate: the model's global
 // tone strength (read at create), and the interface as the game draws it -- its layer, its alpha, and
 // the composited back buffer -- which is what the model's UI correction was designed around. Called

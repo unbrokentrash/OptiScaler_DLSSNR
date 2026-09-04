@@ -418,6 +418,37 @@ void RenderMenu(Config* config, float menuResScale)
             pendingScale = -1;
         }
 
+        // Beside the resolution slider, because it changes what that slider MEANS: with this on it
+        // stops being how much of the model's contribution to compute and becomes a real input
+        // resolution, with the model itself doing the enlarging.
+        {
+            const bool below = scalePercent < 100;
+            ImGui::BeginDisabled(!below);
+
+            bool modelUp = config->DlssNrModelUpscale.value_or_default();
+            if (ImGui::Checkbox("Let the model upscale", &modelUp))
+                config->DlssNrModelUpscale = modelUp;
+
+            ImGui::EndDisabled();
+        }
+
+        HelpMarker("Hands the model a small frame and asks it for a large one, instead of running it"
+                       "\nsmall and stretching its edit."
+                       "\n\nModel resolution below 100% has never used the model's own upscaling. It"
+                       "\nruns the model at the reduced size and enlarges the EDIT, leaving the frame"
+                       "\nunderneath untouched -- compositing, which is why the help above talks about"
+                       "\nthe model's contribution rather than about resolution."
+                       "\n\nFeature 18 is not only a post-process: NVIDIA's own addon carries"
+                       "\nInputWidth, OutputWidth, Upscaling and ScalingRatio, and this project's"
+                       "\nforwarder already reads that ratio through the model's own callback. Nothing"
+                       "\nhere had ever switched it on."
+                       "\n\nSo the answer comes back already at the frame's size and nothing downstream"
+                       "\nenlarges it -- no bilinear tap, no filter, no stretched edit. Pair it with"
+                       "\nreversible proxy + replace to see the model's picture on its own."
+                       "\n\nWhether the model accepts it is the open question; the log says either way,"
+                       "\nand a refusal falls back to the pass exactly as it was. Experimental, off by"
+                       "\ndefault, and it rebuilds the feature when toggled.");
+
         // What the percentage above actually came out as, from the live feature. The same number means
         // different pixel counts on either side of the placement toggle -- it is a fraction of the
         // render raster before the upscale and of the display raster after it -- so someone aiming at
