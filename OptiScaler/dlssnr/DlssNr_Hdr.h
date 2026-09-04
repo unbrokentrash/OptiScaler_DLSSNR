@@ -17,7 +17,8 @@
 //   to LOOK at: Windows Photos, Chrome and Edge read cICP and put it on the screen as real HDR on an
 //   HDR display. It is a display-referred picture rather than the frame's own numbers -- absolute,
 //   with paper white placed at the 203 nits BT.2408 specifies for it -- so measure from the EXR and
-//   look at this.
+//   look at this. PQ stops at 10000 nits, which is 49x paper white, so this clips where a real frame
+//   goes past it (the sun, a muzzle flash) and the EXR does not.
 //
 // JPEG XL is not here. A conformant encoder needs entropy coding, Brotli-compressed metadata and a
 // modular-mode bitstream -- it is libjxl, plus brotli and highway, and this project builds with
