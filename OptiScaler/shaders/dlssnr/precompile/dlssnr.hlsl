@@ -687,9 +687,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                     // composition then hands back something 0.5% away from the frame it started with.
                     // Those two numbers side by side say which stage the work is being lost at --
                     // and until now the chain simply stopped one step short of the answer.
+                    //
+                    // Read through t4, which is the exposure slot and exists on D3D12 only -- Vulkan
+                    // has no eighth descriptor and compiles the whole live-exposure path out. The
+                    // probe is dispatched from the D3D12 pass alone, so on Vulkan this simply reports
+                    // nothing rather than pretending to a fifth number it cannot take.
+#ifndef VK_MODE
                     const float o = dot(max(gOriginal.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
                     const float c = dot(max(gExposure.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
                     sum += abs(c - o);
+#endif
                 }
             }
         }
