@@ -630,45 +630,56 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // Three numbers, so that "no visual change" stops being a thing anyone has to reason about.
+    // What the model is actually doing, measured rather than argued about.
     //
-    // Four rounds of composition work have now been reported as no difference, and every hypothesis
-    // for why was argued from the source rather than measured. Nothing in this pass has ever said what
-    // magnitude the pictures it handles actually are -- so a proxy that came out black, or a model
-    // answer identical to its input, would look exactly like a composition bug and could not be told
-    // apart from one.
+    //   x = 0  mean luminance of the picture the model was shown
+    //   x = 1  mean luminance of the picture it returned
+    //   x = 2  mean luminance of the untouched frame
+    //   x = 3  mean ABSOLUTE luminance difference between the first two
     //
-    //   x = 0  the picture the model was shown
-    //   x = 1  the picture it returned
-    //   x = 2  the untouched frame
+    // The fourth is the one that matters and the first version of this did not have it. A ratio of
+    // means cannot see what this model mostly does: it adds and removes local structure, and those
+    // changes cancel in a mean. Measured that way the model looked like it was barely working at both
+    // placements -- 1% one side, 3% the other -- which is not a fact about the model, it is a fact
+    // about averaging signed numbers. The mean of |model - proxy| does not cancel, so it says how much
+    // of the picture the model actually rewrote.
     //
-    // Mean luminance over a fixed 8x8 grid of samples, which is resolution-independent and enough to
-    // tell 0.4 from 0.0004. The first two are in proxy space and directly comparable to each other:
-    // their ratio IS how much the model changed the picture. The third is the frame in its own linear
-    // scale, and says whether the encode was handed something sane to begin with.
+    // A dynamic loop rather than an unrolled one: 144 samples of a 12x12 grid costs a fraction of what
+    // 64 unrolled samples cost in instructions, and more samples make the absolute difference steady
+    // enough to compare between frames.
     if (gMode == 6)
     {
+        const uint kGrid = 12u;
         float sum = 0.0;
 
-        [unroll] for (uint sy = 0; sy < 8u; ++sy)
+        for (uint sy = 0; sy < kGrid; ++sy)
         {
-            [unroll] for (uint sx = 0; sx < 8u; ++sx)
+            for (uint sx = 0; sx < kGrid; ++sx)
             {
-                const float2 st = (float2(sx, sy) + 0.5) / 8.0;
-                float3 c;
+                const float2 st = (float2(sx, sy) + 0.5) / (float) kGrid;
 
                 if (id.x == 0u)
-                    c = gSource.SampleLevel(gLinear, st, 0).rgb;
+                {
+                    sum += dot(max(gSource.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
+                }
                 else if (id.x == 1u)
-                    c = gModel.SampleLevel(gLinear, st, 0).rgb;
+                {
+                    sum += dot(max(gModel.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
+                }
+                else if (id.x == 2u)
+                {
+                    sum += dot(max(gOriginal.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
+                }
                 else
-                    c = gOriginal.SampleLevel(gLinear, st, 0).rgb;
-
-                sum += dot(max(c, float3(0.0, 0.0, 0.0)), kLuma);
+                {
+                    const float p = dot(max(gSource.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
+                    const float m = dot(max(gModel.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
+                    sum += abs(m - p);
+                }
             }
         }
 
-        gTarget[uint2(id.x, 0u)] = float4(sum / 64.0, 0.0, 0.0, 1.0);
+        gTarget[uint2(id.x, 0u)] = float4(sum / (float) (kGrid * kGrid), 0.0, 0.0, 1.0);
         return;
     }
 
