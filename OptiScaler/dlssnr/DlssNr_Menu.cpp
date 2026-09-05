@@ -3,6 +3,7 @@
 
 #include "DlssNr.h"
 #include "DlssNr_ExposureScan.h"
+#include "DlssNr_Prepass.h"
 
 
 #include <Config.h>
@@ -163,6 +164,81 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nother, and keep whichever makes small detail respond."
                        "\n\nOnly the model's input and its answer are resampled -- the frame underneath is"
                        "\nnever touched. Meaningless after the upscale, where the jitter is already gone.");
+
+        // Above the frame-averaging, because it does the same job with the tool built for it and
+        // stands that one down when it runs.
+        {
+            const bool before = config->DlssNrBeforeUpscale.value_or_default();
+            ImGui::BeginDisabled(!before);
+
+            bool prepass = config->DlssNrPrepass.value_or_default();
+
+            if (ImGui::Checkbox("Clean the input with a second DLSS", &prepass))
+                config->DlssNrPrepass = prepass;
+
+            if (prepass)
+            {
+                static const char* rejitterNames[] = { "Off", "On (subtract)", "On (add)" };
+                int rejitter = (int) config->DlssNrPrepassRejitter.value_or_default();
+
+                if (rejitter < 0 || rejitter >= IM_ARRAYSIZE(rejitterNames))
+                    rejitter = 1;
+
+                ImGui::PushItemWidth(220.0f * menuResScale);
+
+                if (ImGui::Combo("Put the edit back on the jitter", &rejitter, rejitterNames,
+                                 IM_ARRAYSIZE(rejitterNames)))
+                    config->DlssNrPrepassRejitter = (uint32_t) rejitter;
+
+                ImGui::PopItemWidth();
+            }
+
+            ImGui::EndDisabled();
+
+            // What the driver actually said, on screen rather than in a log file that is off by
+            // default. A refusal here is the whole result of the experiment.
+            if (prepass && before)
+            {
+                const auto st = DlssNr::Prepass::State();
+
+                if (st.built)
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                       "A second DLSS is running at %ux%u, 1:1.", st.width, st.height);
+                else if (st.refused)
+                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "It would not run: %s (0x%X).",
+                                       st.why, st.lastResult);
+                else
+                    ImGui::TextDisabled("Starting up...");
+            }
+        }
+
+        HelpMarker("Hands the model a picture DLSS has already resolved, instead of the raw frame."
+                       "\n\nThis is the one thing the before-the-upscale placement is missing, and it is"
+                       "\nnot resolution: the SAME model resolution after the upscale looks better. The"
+                       "\nframe before the upscale is raw -- jittered, aliased, one sample a pixel --"
+                       "\nand a model carrying temporal state finds its own history a fraction of a"
+                       "\npixel out every frame, in a pattern nothing it was given explains."
+                       "\n\nResolving that is exactly what a temporal upscaler does. At a 1:1 ratio"
+                       "\n(DLAA) DLSS does nothing else: same resolution in, same out, jitter"
+                       "\naccumulated away, aliasing gone. So the model is shown the picture it would"
+                       "\nhave been shown anyway, cleaned by the software that is good at cleaning it."
+                       "\n\nIt cannot damage the frame, whatever it does to that picture. The"
+                       "\ncomposition is a transfer -- the model's answer MINUS the picture it was"
+                       "\nshown -- so this pass appears on both sides of the subtraction and cancels."
+                       "\nThe upscaler downstream still gets the game's own jittered frame with the"
+                       "\nmodel's edit on it, never this one. If it goes wrong it goes wrong in the"
+                       "\nmodel's input, which is the cheapest place for it to go wrong."
+                       "\n\nCosts one DLAA evaluate at render resolution -- a fraction of what the model"
+                       "\nitself costs at the same size -- plus a DLSS instance's worth of history."
+                       "\n\nTurns the frame-averaging below off while it runs: both resolve jitter, and"
+                       "\nin series the second gets a picture the first already smeared. Unavailable"
+                       "\nabove 100% model resolution and while the model is upscaling."
+                       "\n\n\"Put the edit back on the jitter\" is the other half. DLSS returns the"
+                       "\npicture on pixel centres while the frame the edit lands on is still jittered,"
+                       "\nso the edit is shifted back on the way out. The sign is the game's, same as"
+                       "\neverywhere else here -- and Off is worth trying, since the shading the model"
+                       "\nadds is broad and may not notice half a pixel."
+                       "\n\nExperimental, and off by default.");
 
         // Beside the de-jitter because it is the other half of the same job: de-jitter places each
         // frame's sample on the pixel grid, this averages those samples into a picture.

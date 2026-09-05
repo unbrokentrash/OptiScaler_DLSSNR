@@ -322,6 +322,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrAbCaptureKey.set_from_config(readInt("DlssNr", "AbCaptureKey"));
             DlssNrAbCaptureSettle.set_from_config(readUInt("DlssNr", "AbCaptureSettle"));
             DlssNrDejitter.set_from_config(readUInt("DlssNr", "Dejitter"));
+            DlssNrPrepass.set_from_config(readBool("DlssNr", "Prepass"));
+            DlssNrPrepassRejitter.set_from_config(readUInt("DlssNr", "PrepassRejitter"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
@@ -1222,6 +1224,9 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "AbCaptureSettle",
                  GetIntValue(Instance()->DlssNrAbCaptureSettle.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Dejitter", GetIntValue(Instance()->DlssNrDejitter.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "Prepass", GetBoolValue(Instance()->DlssNrPrepass.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "PrepassRejitter",
+                 GetIntValue(Instance()->DlssNrPrepassRejitter.value_for_config()).c_str());
     ini.SetValue("DlssNr", "TransferStrength",
                  GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ColourStrength",

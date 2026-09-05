@@ -98,6 +98,12 @@ struct DlssNrFrameInfo
     unsigned int RenderSubrectWidth = 0;
     unsigned int RenderSubrectHeight = 0;
 
+    // The game's own DLSS_Feature_Create_Flags, kept whole rather than only decoded into the two
+    // fields above. A second DLSS run over this frame has to state the same things about the game's
+    // data that the game stated -- which way depth runs, whether the vectors carry the jitter -- and
+    // those bits live nowhere else once the parameter block has moved on.
+    unsigned int CreateFlags = 0;
+
     // The sub-pixel offset the upscaler jittered the camera by, in render-resolution pixels, as the
     // game reports it. Every upscaler in the tree reads this; the pass did not, which is what left the
     // model unable to trust its own history on a pre-upscale frame.

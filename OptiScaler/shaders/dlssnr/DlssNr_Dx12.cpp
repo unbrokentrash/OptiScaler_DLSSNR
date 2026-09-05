@@ -8,6 +8,7 @@
 #include <dlssnr/DlssNr_Capture.h>
 #include <dlssnr/DlssNr_AbCapture.h>
 #include <dlssnr/DlssNr_Proxy.h>
+#include <dlssnr/DlssNr_Prepass.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include "DlssNr_Dx12.h"
@@ -290,6 +291,10 @@ struct NrState
 
     // The frame shrunk for the model, when it is working below full resolution.
     ID3D12Resource* colorSmall = nullptr;
+
+    // The proxy after a second DLSS has resolved the jitter out of it, when that pass is running.
+    // Same size and format as colorCopy -- this is the same picture, cleaned, not a different one.
+    ID3D12Resource* cleanProxy = nullptr;
 
     // The upscaler's input colour, edited.
     //
@@ -923,7 +928,8 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
     g_nr.passCeiling = kMaxNrPasses;
 
     for (ID3D12Resource** r :
-         { &g_nr.output, &g_nr.passBuf, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall })
+         { &g_nr.output, &g_nr.passBuf, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall,
+           &g_nr.cleanProxy })
         ParkNrResource(*r);
 
     g_nr.reset = true;
@@ -1701,6 +1707,9 @@ void ReadFrameInfo(NVSDK_NGX_Parameter* params, DlssNrFrameInfo& frame)
 
     frame.ColourIsLinearHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
 
+    // Kept whole for anything that has to restate what the game said about its own data.
+    frame.CreateFlags = createFlags;
+
     // The game telling the upscaler to forget everything it has accumulated: a cut, a teleport, a
     // load. Every upscaler in this tree reads it and this pass did not, so the model's history was
     // only ever reset by things that happened to us -- a resize, a rebuild, a recovery from failure
@@ -2388,6 +2397,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ParkNrResource(g_nr.colorCopy);
             ParkNrResource(g_nr.hdrCopy);
             ParkNrResource(g_nr.colorSmall);
+            ParkNrResource(g_nr.cleanProxy);
             ParkNrResource(g_nr.outputNative);
             ParkNrResource(g_nr.accum[0]);
             ParkNrResource(g_nr.accum[1]);
@@ -2458,9 +2468,23 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_nr.colorSmall =
             CreateScratch(device, ProxyFormatOf(g_nr.output, desc.Format), feedWidth, feedHeight);
 
+    // A second DLSS, at 1:1, to resolve the jitter out of the model's input properly.
+    //
+    // Before the upscale only: after it the frame has already been through the game's upscaler and
+    // there is no jitter left to resolve. Not above native either -- the supersample path composites
+    // its down-legged answer against the full-size proxy rather than against what the model was
+    // shown, so a cleaned input and the proxy it is compared with would be two different pictures.
+    const bool prepassWanted = !inPlace && cfg.DlssNrPrepass.value_or_default() && workScale <= 1.0f &&
+                               !modelUpscale;
+
     // The accumulation, at the frame's size, built only when it is asked for -- two full surfaces is
     // not a cost to pay for a feature that is off.
-    const unsigned int accumMode = inPlace ? 0u : cfg.DlssNrInputAccum.value_or_default();
+    //
+    // Stood down while the prepass runs: both exist to resolve the jitter, one by averaging frames
+    // and one by asking a temporal upscaler to do it, and running them in series would hand the
+    // second an input the first had already smeared.
+    const unsigned int accumMode =
+        (inPlace || prepassWanted) ? 0u : cfg.DlssNrInputAccum.value_or_default();
 
     if (accumMode != 0)
     {
@@ -2472,6 +2496,20 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 g_nr.accumValid = false;
             }
         }
+    }
+
+    // Where the second DLSS writes. The same format as the proxy it cleans, because it is the same
+    // picture -- and only while the pass is switched on: this is a full frame-sized surface.
+    if (prepassWanted && g_nr.cleanProxy == nullptr)
+    {
+        g_nr.cleanProxy = CreateScratch(device, ProxyFormatOf(g_nr.output, desc.Format), width, height);
+
+        if (g_nr.cleanProxy == nullptr)
+            LOG_WARN("DLSS-NR prepass: its output surface could not be allocated; staying off");
+    }
+    else if (!prepassWanted && g_nr.cleanProxy != nullptr)
+    {
+        ParkNrResource(g_nr.cleanProxy);
     }
 
     // The down-leg target is native (the answer is brought back to frame size before the resolve).
@@ -3018,7 +3056,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Left reachable rather than deleted, because it costs nothing to keep and is how that finding is
     // reproduced. But it is superseded, and the accumulation refuses to run alongside it.
     const unsigned int dejitter =
-        (inPlace || accumMode != 0) ? 0u : cfg.DlssNrDejitter.value_or_default();
+        (inPlace || accumMode != 0 || prepassWanted) ? 0u : cfg.DlssNrDejitter.value_or_default();
 
     encodeParams.JitterX = frame.JitterX;
     encodeParams.JitterY = frame.JitterY;
@@ -3060,7 +3098,39 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     }
 
     ID3D12Resource* accumHeld = nullptr;
+    ID3D12Resource* cleanHeld = nullptr;
     ID3D12Resource* modelInput = g_nr.colorCopy;
+
+    // Resolve the jitter with a second DLSS, rather than by averaging frames or by shifting a grid.
+    //
+    // The frame before the upscale is raw -- jittered, aliased, one sample a pixel -- and that, not
+    // its resolution, is what the model is missing at this placement: the same model resolution AFTER
+    // the upscale looks better. Averaging frames was the first attempt at it and only half works.
+    // DLSS at a 1:1 ratio is the thing actually built for the job.
+    //
+    // Nothing the player sees goes through this. The composition below is a transfer -- the model's
+    // answer MINUS the picture it was shown, added onto the untouched frame -- so this pass appears
+    // on both sides of that subtraction and cancels. It has one job, to give the model something
+    // clean to reason about, and it cannot damage the frame even if it does that job badly. The
+    // upscaler downstream still receives the game's own jittered frame plus the model's edit.
+    //
+    // A false answer means nothing was written -- a build frame, a refusal, a machine with no DLSS --
+    // and the model is shown the ordinary proxy, exactly as it would have been.
+    if (prepassWanted && g_nr.cleanProxy != nullptr &&
+        DlssNr::Prepass::Run(cmdList, device, g_nr.colorCopy, depthIn, motionIn, g_nr.cleanProxy,
+                             width, height, guideWidth, guideHeight, frame, frame.CreateFlags,
+                             g_nr.reset))
+    {
+        Barrier(cmdList, g_nr.cleanProxy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        // What the model is shown from here on. resolveProxy follows modelInput, so the composition
+        // compares the answer against this same cleaned picture and the cleaning cancels out of the
+        // edit. Pointing the model at one picture and the comparison at another is the bug this
+        // project has already made once, with the accumulation.
+        modelInput = g_nr.cleanProxy;
+        cleanHeld = g_nr.cleanProxy;
+    }
 
     // Resolve the jitter, by averaging frames rather than by shifting the sampling grid.
     //
@@ -3515,7 +3585,22 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.Height = height;
         resolveParams.JitterX = frame.JitterX;
         resolveParams.JitterY = frame.JitterY;
-        resolveParams.DejitterMode = dejitter;
+        // Putting the edit back where the frame it lands on actually is.
+        //
+        // The encode's de-jitter and the resolve's are the same number for the same reason: shift the
+        // model's input onto the pixel grid, then read its answer back through the same offset. The
+        // prepass breaks that symmetry. It hands the model a picture DLSS has already resolved --
+        // aligned to pixel centres, no shift of ours involved -- while the frame the edit is composed
+        // onto is still the game's, still jittered. So the encode does nothing and the resolve does
+        // the whole correction on its own.
+        //
+        // Which sign the offset carries is the game's to choose, exactly as it is for the de-jitter,
+        // which is why this is a mode rather than a flag. At zero the edit lands where the model
+        // computed it, half a pixel or so off the frame underneath -- worth seeing, since the shading
+        // the model adds is broad and may not care.
+        resolveParams.DejitterMode = cleanHeld != nullptr
+                                         ? cfg.DlssNrPrepassRejitter.value_or_default()
+                                         : dejitter;
         // Pre-compensation for what the upscaler downstream discards. Identity in place, where the
         // destination IS the finished frame and nothing follows the pass that could take any of it.
         resolveParams.CompLuma = inPlace ? 1.0f : cfg.DlssNrCompLuma.value_or_default();
@@ -3749,6 +3834,12 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // The accumulation the model read is put back as the unordered access its own next dispatch will
     // barrier away from. Without this the ping-pong hands the same surface to Barrier() as UAV while it
     // is actually readable, which is an invalid transition submitted on every frame the feature is on.
+    // The prepass wrote this as an unordered access and it was read for the rest of the frame; the
+    // next frame's DLSS expects to find it writable again.
+    if (cleanHeld != nullptr)
+        Barrier(cmdList, cleanHeld, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
     if (accumHeld != nullptr)
         Barrier(cmdList, accumHeld, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -4258,6 +4349,14 @@ void Shutdown()
         g_nr.passBuf->Release();
         g_nr.passBuf = nullptr;
     }
+
+    if (g_nr.cleanProxy != nullptr)
+    {
+        g_nr.cleanProxy->Release();
+        g_nr.cleanProxy = nullptr;
+    }
+
+    DlssNr::Prepass::Release();
 
     for (ID3D12Resource*& a : g_nr.accum)
     {

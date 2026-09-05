@@ -304,6 +304,29 @@ class Config
     // the misalignment instead of removing it. Off by default until a capture says which way round it
     // goes in a real title.
     CustomOptional<uint32_t> DlssNrDejitter { 0 };
+
+    // Run a second DLSS, at a 1:1 ratio, over the model's input before the model sees it.
+    //
+    // Running the model before the upscale is the only affordable placement -- cost is the frame's
+    // area -- and what it gives up is not resolution: the same model resolution AFTER the upscale
+    // looks better. It is that the frame before the upscale is raw. Jittered, aliased, one sample a
+    // pixel. Resolving that is what DLSS is for, and at 1:1 it does nothing else.
+    //
+    // Safe by construction, whatever it does to the picture. The composition is a transfer -- the
+    // model's answer minus the picture it was shown, added onto the untouched frame -- so this pass
+    // sits on both sides of that subtraction and cancels. The upscaler downstream still receives the
+    // game's own jittered frame with the model's edit on it, never this one.
+    //
+    // Costs one DLAA evaluate at render resolution, and a model instance's worth of history.
+    CustomOptional<bool> DlssNrPrepass { false };
+
+    // Which way to shift the model's edit back onto the still-jittered frame it is composed onto.
+    //
+    // 0 none, 1 subtract the jitter, 2 add it -- the same three choices, and the same reason for
+    // there being three, as the de-jitter above: the sign of the offset is the game's convention.
+    // Only meaningful while the prepass is running, since only then is the model's answer on a
+    // different grid from the frame underneath it.
+    CustomOptional<uint32_t> DlssNrPrepassRejitter { 1 };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
