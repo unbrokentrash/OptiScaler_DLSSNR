@@ -36,7 +36,7 @@ cbuffer Params : register(b0)
     float gCompChroma;
     float gAccumAlpha;     // how much of the current frame enters the accumulated input, 0..1
     uint  gAccumMv;        // reprojection sign: 1 subtract the vector, 2 add it
-    uint  gComposeMode;    // 0 the model's picture, 1 rebuild the proxy first, 2 the frame x the model's change
+    uint  gComposeMode;    // 0 the model's picture, 1 rebuild the proxy, 2 frame x the change, 3 raw + delta
 };
 
 // How much the edit is boosted before an upscaler gets to eat some of it.
@@ -1095,7 +1095,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // it. Then the frame keeps its own picture, the model contributes exactly what it changed, and
     // anything done to the model's input cancels -- it is present both in the model's answer and in
     // the picture that answer is measured against.
-    if ((gTransfer == 1 && modelRanSmall) || gComposeMode != 0)
+    if ((gTransfer == 1 && modelRanSmall) || (gComposeMode != 0 && gComposeMode != 3))
     {
         // Saturated, because that is what the encode does and this has to reproduce it exactly.
         //
@@ -1242,6 +1242,57 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     if (gColourStrength > 1.0)
         result = ClampAp1(FromOkLab(float3(1.0, gColourStrength, gColourStrength) * ToOkLab(max(result, 0.0))));
+
+    // Mode 3: the frame plus the model's delta, in the frame's own light, with no proxy at all.
+    //
+    // This is a port of xenmods/DLSSNR-Cost-Scaler, which does the same job as the model-resolution
+    // slider here -- downsample, evaluate, composite -- as a standalone nvngx_dlssnr proxy, and is
+    // reported to work without blur. It credits this fork for the matched residual idea, and then
+    // does one thing completely differently, which is the whole reason it is worth porting.
+    //
+    // It never builds a proxy. The model is handed the game's frame, downsampled and otherwise
+    // untouched: no paper white, no tone curve, no sRGB encode, no [0,1] clamp. Its answer comes back
+    // in that same space, and the composite is simply
+    //
+    //     result = original + (modelOut - modelIn) * strength
+    //
+    // bounded by a luminance guard. Every other mode in this file works in proxy space, where the
+    // frame has been divided by a measured white point, run through NeutwoEncode or a soft knee, and
+    // written to an sRGB surface -- and is then "decoded" on the way out by re-anchoring luminance
+    // rather than by inverting the curve. That round trip is the largest thing this fork does that
+    // the reference does not, and it is the one part of the chain the probes could never measure,
+    // because they only ever compared pictures that had already been through it.
+    //
+    // Whether the encode helps is a real question with a real argument behind it -- the model was
+    // trained on display-referred pictures, and a linear HDR frame is not one. But it is an argument,
+    // and this is an existence proof, so it belongs in the tree as something that can be switched on
+    // and looked at rather than reasoned about further.
+    //
+    // The host forces passthrough for this mode, which makes the encode a straight copy and leaves
+    // normScale at 1, so `proxy`, `model` and `original` here are all the game's own values.
+    if (gComposeMode == 3)
+    {
+        float3 raw = max(original + edit * max(gTransferStrength, 0.0), 0.0);
+
+        // The reference's guard, kept to the letter: bound the composite against the frame's own
+        // luminance and against where the model's own ratio says it should land, whichever is more
+        // generous, so a highlight cannot run away and a dark pixel cannot be driven through zero.
+        const float inLuma = proxyLuma;
+        const float outLuma = dot(max(model, 0.0), kLuma);
+        const float resLuma = dot(raw, kLuma);
+
+        if (resLuma > 1e-5 && inLuma > 1e-5)
+        {
+            const float lumaRatioRaw = (outLuma + kRatioFloor) / (inLuma + kRatioFloor);
+            const float targetLuma = originalLuma * lumaRatioRaw;
+            const float maxAllowed = max(originalLuma * 2.5, targetLuma * 1.5 + 0.1);
+
+            if (resLuma > maxAllowed)
+                raw *= maxAllowed / resLuma;
+        }
+
+        result = raw;
+    }
 
     // Mode 2: the frame times what the model changed, instead of the model's picture.
     //

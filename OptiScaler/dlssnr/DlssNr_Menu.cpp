@@ -129,11 +129,12 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::BeginDisabled(!before);
 
             static const char* carryNames[] = { "The model's picture (old)", "Rebuilt proxy + the edit",
-                                                "The frame x the model's change" };
+                                                "The frame x the model's change",
+                                                "Raw frame + the model's delta" };
             int carry = (int) config->DlssNrCompose.value_or_default();
 
             if (carry < 0 || carry >= IM_ARRAYSIZE(carryNames))
-                carry = 2;
+                carry = 3;
 
             ImGui::PushItemWidth(260.0f * menuResScale);
 
@@ -168,6 +169,19 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nmodel's input was reduced or substituted. At full size with a plain input it"
                        "\nis the IDENTITY -- fullProxy + (model - proxy) is model -- so it is not a fix"
                        "\nfor the placement on its own, and it was shipped once as though it were."
+                       "\n\n\"Raw frame + the model's delta\" is the one that is actually different,"
+                       "\nand it is a port of xenmods/DLSSNR-Cost-Scaler -- a standalone nvngx_dlssnr"
+                       "\nproxy that does this fork's model-resolution job and is reported to work"
+                       "\nwithout blur. It builds NO PROXY at all: the model is handed the game's own"
+                       "\nframe with no paper white, no tone curve, no sRGB encode and no clamp, and"
+                       "\nits answer is added straight back as original + delta, bounded by a"
+                       "\nluminance guard."
+                       "\n\nThat matters because the other three all work in proxy space, and the"
+                       "\nproxy round trip -- divide by a measured white point, run a curve, write to"
+                       "\nan sRGB surface, then un-curve by re-anchoring luminance instead of"
+                       "\ninverting it -- is the largest thing this fork does that the reference does"
+                       "\nnot. Paper white and the reversible proxy stop mattering in this mode,"
+                       "\nbecause nothing is encoded."
                        "\n\n\"The model's picture (old)\" is what this always did, kept as the A/B."
                        "\n\nMeaningless after the upscale, which always uses the old path."
                        "\n\nAND: a reversible REPLACE mode discards the composition entirely -- the"

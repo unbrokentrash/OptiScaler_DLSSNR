@@ -2344,7 +2344,17 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     //
     // Only when the frame is linear HDR. A passthrough frame is written to the proxy RAW, so it is not
     // bounded by anything and packing it would clip.
-    const bool wantCompact = cfg.DlssNrCompactProxy.value_or_default() && isHdrBuffer &&
+    // The reference composite: hand the model the game's own frame and add its delta straight back.
+    //
+    // Decided here rather than at the resolve because it changes the ENCODE -- there is no proxy in
+    // this mode, so the encode becomes a copy -- and because a raw HDR frame must not be packed into
+    // the compact format on its way through.
+    const bool rawCompose = !inPlace && cfg.DlssNrCompose.value_or_default() == 3;
+
+    // Never in the raw mode: the proxy then holds the game's own open-ended linear light rather than
+    // a bounded [0,1] picture, and packing that is exactly the clipping this format was ruled safe
+    // for avoiding.
+    const bool wantCompact = cfg.DlssNrCompactProxy.value_or_default() && isHdrBuffer && !rawCompose &&
                              desc.Format != DXGI_FORMAT_R11G11B10_FLOAT;
     const DXGI_FORMAT proxyFormat = wantCompact ? DXGI_FORMAT_R11G11B10_FLOAT : desc.Format;
 
@@ -3050,7 +3060,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     encodeParams.Mode = DlssNrMode_Encode;
     // A frame that is already display-referred is handed over untouched: the encode becomes a copy and
     // the resolve adds the model's edit back at full scale.
-    encodeParams.Passthrough = isHdrBuffer ? 0u : 1u;
+    // Passthrough writes the frame to the proxy untouched, which is precisely what the raw mode
+    // wants: no white point, no curve, no sRGB, nothing for the resolve to undo.
+    encodeParams.Passthrough = (isHdrBuffer && !rawCompose) ? 0u : 1u;
     encodeParams.WhitePoint = whitePoint;
     encodeParams.UseGameExposure = useGameExposure;
     encodeParams.ExposurePreMul = exposurePreMul;
@@ -3634,8 +3646,8 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // proxy being rebuilt their reconstruction lands in the player's frame along with the model's.
         unsigned int composeMode = inPlace ? 0u : cfg.DlssNrCompose.value_or_default();
 
-        if (composeMode > 2u)
-            composeMode = 2u;
+        if (composeMode > 3u)
+            composeMode = 3u;
 
         if (composeMode < 1u && (cleanHeld != nullptr || accumHeld != nullptr))
             composeMode = 1u;
@@ -3655,7 +3667,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
         resolveParams.Transfer = cfg.DlssNrTransfer.value_or_default();
         resolveParams.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
-        resolveParams.Passthrough = isHdrBuffer ? 0u : 1u;
+        resolveParams.Passthrough = (isHdrBuffer && !rawCompose) ? 0u : 1u;
         resolveParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
         // The A/B capture holds the edit back for exactly one frame. ApplyModel writes back the
         // untouched frame the encode kept, so that frame is bit-identical to the pass being switched

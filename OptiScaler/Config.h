@@ -326,10 +326,21 @@ class Config
     //   2  The frame times what the model changed: original * (model / proxy). Both sides are in
     //      proxy space so it cancels, leaving what the model DID, applied to the frame the player has
     //      -- at the frame's own precision and bit-exact where the model changed nothing.
+    //   3  No proxy at all. The model is handed the game's own frame -- no paper white, no tone
+    //      curve, no sRGB encode, no clamp -- and its delta is added straight back:
+    //      original + (modelOut - modelIn) * strength, bounded by a luminance guard.
     //
-    // Defaults to 2, because the placement's whole problem is that it hands an upscaler a
-    // reconstruction. Meaningless after the upscale, which always uses 0.
-    CustomOptional<uint32_t> DlssNrCompose { 2 };
+    // Modes 0, 1 and 2 measure as the same operation, because 0's per-pixel luminance re-anchoring
+    // already performs the transfer 2 spells out and 1 is the identity at full size. All three work
+    // in proxy space, and the proxy round trip -- divide by a measured white point, run a tone curve,
+    // write to an sRGB surface, then "decode" by re-anchoring luminance rather than by inverting the
+    // curve -- is the largest thing this fork does that a working reference implementation does not.
+    //
+    // Mode 3 is a port of xenmods/DLSSNR-Cost-Scaler, which does this fork's model-resolution job as
+    // a standalone nvngx_dlssnr proxy and is reported to work without blur. It is the default because
+    // it is the only one of the four with an existence proof behind it; the others differ from each
+    // other by less than the eye can see. Meaningless after the upscale, which always uses 0.
+    CustomOptional<uint32_t> DlssNrCompose { 3 };
 
     // Run a second DLSS, at a 1:1 ratio, over the model's input before the model sees it.
     //
