@@ -15,11 +15,25 @@
 // history rectified against motion. That is precisely the picture the model is missing, produced by
 // the one piece of software in the process that is actually good at producing it.
 //
-// The output of this is NOT what the player sees, and that is what makes it safe. The composition
-// downstream is a transfer: the edit is the model's answer MINUS the picture it was shown, and that
-// edit is added onto the untouched frame. Whatever this pass does to the picture therefore cancels --
-// it appears on both sides of the subtraction. It has one job, to give the model something clean to
-// reason about, and it cannot damage the frame on its way through even if it does that job badly.
+// The output of this is NOT what the player sees -- but that took a change downstream to be true, and
+// it is worth writing down why.
+//
+// The composition is NOT a transfer by default. It hands back the model's PICTURE with its luminance
+// re-anchored to the frame, not an edit added onto the frame. Under that arithmetic everything this
+// pass does to the model's input arrives in the player's frame and goes on to the game's upscaler --
+// a pass meant to clean the model's input would instead be replacing the frame with its own
+// reconstruction. That is exactly what the first version of this did.
+//
+// The resolve is now told when the model's input was substituted (DlssNrConstants::InputSubstituted),
+// and on that flag it rebuilds the frame's own proxy and carries only the model's DIFFERENCE onto it.
+// THEN this cancels: it is present in the model's answer and in the picture that answer is measured
+// against, so it subtracts out. With that in place the pass has one job, to give the model something
+// clean to reason about, and it cannot damage the frame even if it does that job badly.
+//
+// The one path that is deliberately not covered is reversible "replace" (modes 2 and 4), which exists
+// to show the model's raw answer with no composition at all. With this running, that view shows the
+// model's answer on a DLSS-resolved frame -- still a true picture of what the model returned, but no
+// longer a picture of what the model did to the GAME'S frame.
 //
 // What it costs is one DLAA evaluate at render resolution, which is a fraction of what the model
 // itself costs at the same size.

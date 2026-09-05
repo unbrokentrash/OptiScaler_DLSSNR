@@ -36,6 +36,7 @@ cbuffer Params : register(b0)
     float gCompChroma;
     float gAccumAlpha;     // how much of the current frame enters the accumulated input, 0..1
     uint  gAccumMv;        // reprojection sign: 1 subtract the vector, 2 add it
+    uint  gInputSubstituted; // 1 = what the model was shown is not this frame's own proxy
 };
 
 // How much the edit is boosted before an upscaler gets to eat some of it.
@@ -561,10 +562,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // pixel every frame, so successive frames carry DIFFERENT sub-pixel samples of the same scene, and
     // averaging them recovers detail no single frame holds.
     //
-    // Only the model's input is built this way. The frame the upscaler receives is never touched -- the
-    // composition puts the model's edit back through JitterUv() onto the untouched, still-jittered
-    // original, so the upscaler still gets the jittered input its own accumulation needs. That is the
-    // "put the jitter back for SR" half, and it was already right; this is the half that was missing.
+    // Only the model's input is built this way, and the frame the upscaler receives keeps its own
+    // picture -- but only because the resolve is told the input was substituted and carries the
+    // model's DIFFERENCE onto the frame's own proxy rather than handing back the model's picture
+    // whole. Without that flag this average landed in the player's frame. See gInputSubstituted.
     //
     //   gSource   the de-jittered proxy for this frame
     //   gModel    the accumulation as it stood last frame
@@ -984,7 +985,27 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     gSource.GetDimensions(proxyW, proxyH);
     const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight;
 
-    if (gTransfer == 1 && modelRanSmall)
+    // And the other way the model's picture can fail to be this frame's own.
+    //
+    // Everything above assumes the model was shown encode(original) -- possibly shrunk, which is what
+    // modelRanSmall detects. It can also have been shown a DIFFERENT PICTURE at the same size: the
+    // frame-averaging accumulation builds one out of several frames, and the DLSS prepass hands over
+    // one a temporal upscaler has resolved. Neither changes the size, so neither was noticed here.
+    //
+    // What that cost is the whole point of those two features. The composition below does not add an
+    // edit onto the frame -- it hands back the MODEL'S PICTURE with its luminance re-anchored -- so
+    // whatever was done to the model's input arrived in the frame along with the model's answer, and
+    // went on to the game's upscaler. A pass that was meant to clean the model's input was quietly
+    // replacing the player's frame with its own reconstruction. That is not a subtlety; it is the
+    // difference between showing the model a better picture and swapping the picture.
+    //
+    // So a substituted input takes the residual path unconditionally, whatever the Enlargement
+    // setting says. There the frame's own proxy is rebuilt here and only the model's DIFFERENCE is
+    // carried onto it, which makes the substitution cancel exactly -- it is present in both the
+    // model's answer and the picture that answer is measured against.
+    const bool inputSubstituted = gInputSubstituted != 0;
+
+    if ((gTransfer == 1 && modelRanSmall) || inputSubstituted)
     {
         // Saturated, because that is what the encode does and this has to reproduce it exactly.
         //

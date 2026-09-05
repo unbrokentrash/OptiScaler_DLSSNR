@@ -312,10 +312,12 @@ class Config
     // looks better. It is that the frame before the upscale is raw. Jittered, aliased, one sample a
     // pixel. Resolving that is what DLSS is for, and at 1:1 it does nothing else.
     //
-    // Safe by construction, whatever it does to the picture. The composition is a transfer -- the
-    // model's answer minus the picture it was shown, added onto the untouched frame -- so this pass
-    // sits on both sides of that subtraction and cancels. The upscaler downstream still receives the
-    // game's own jittered frame with the model's edit on it, never this one.
+    // Safe because the resolve is told the model's input was substituted, and on that flag carries the
+    // model's DIFFERENCE onto the frame's own proxy instead of handing back the model's picture whole.
+    // This pass is then present on both sides of that subtraction and cancels, and the upscaler
+    // downstream receives the game's own jittered frame with the model's edit on it, never this one.
+    // Without that flag -- which is how this shipped first -- the DLSS reconstruction went into the
+    // player's frame, which is replacing the picture rather than cleaning the model's input.
     //
     // Costs one DLAA evaluate at render resolution, and a model instance's worth of history.
     CustomOptional<bool> DlssNrPrepass { false };

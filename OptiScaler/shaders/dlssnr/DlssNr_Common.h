@@ -228,6 +228,19 @@ struct alignas(256) DlssNrConstants
     // no single frame holds. The frame handed to the upscaler is untouched either way.
     float AccumAlpha;
     uint32_t AccumMv;
+
+    // Whether the picture the model was shown is this frame's own proxy, or a different one.
+    //
+    // Set whenever something replaced the model's input at full size -- the frame-averaging
+    // accumulation, or the DLSS prepass. The resolve cannot tell from the resources: a substituted
+    // input is the same size and format as the one it stands in for, so only the host knows.
+    //
+    // It matters because the composition hands back the model's PICTURE, luminance-anchored to the
+    // frame, rather than adding an edit onto it. Under that arithmetic anything done to the model's
+    // input arrives in the player's frame. With this set the resolve rebuilds the frame's own proxy
+    // and carries only the model's difference onto it, so the substitution cancels and the pass does
+    // what it says: shows the model a better picture without swapping the one on screen.
+    uint32_t InputSubstituted;
 };
 
 class DlssNr_Common

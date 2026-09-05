@@ -3598,6 +3598,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // which is why this is a mode rather than a flag. At zero the edit lands where the model
         // computed it, half a pixel or so off the frame underneath -- worth seeing, since the shading
         // the model adds is broad and may not care.
+        // Tell the resolve that what the model was shown is not this frame's own proxy.
+        //
+        // Both of these replace the model's input at full size, so nothing downstream can detect them
+        // from the resources -- the substitute is the same size and format as the picture it stands
+        // in for. Without being told, the composition hands back the model's picture whole and
+        // whatever was done to its input lands in the player's frame on its way to the upscaler.
+        resolveParams.InputSubstituted = (cleanHeld != nullptr || accumHeld != nullptr) ? 1u : 0u;
+
         resolveParams.DejitterMode = cleanHeld != nullptr
                                          ? cfg.DlssNrPrepassRejitter.value_or_default()
                                          : dejitter;
