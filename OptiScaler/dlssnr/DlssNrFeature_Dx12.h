@@ -127,6 +127,11 @@ struct NrSizes
     // to a log file that is off by default -- so it was, in practice, unreadable.
     float ratios[6] = { -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
     bool ratiosKnown = false;
+
+    // How many passes the model is actually making over the frame. The setting says what was asked
+    // for; this says what was built, which is lower when a feature or its staging surface would not
+    // allocate.
+    unsigned int passes = 1;
 };
 
 NrSizes Sizes();

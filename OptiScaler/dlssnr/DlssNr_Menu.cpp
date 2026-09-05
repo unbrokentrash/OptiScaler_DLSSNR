@@ -428,6 +428,82 @@ void RenderMenu(Config* config, float menuResScale)
             pendingScale = -1;
         }
 
+        // How many times the model runs over the frame, directly under the resolution it runs at --
+        // the two are one trade. Three passes at 50% costs about three quarters of one pass at 100%,
+        // and the whole reason this control exists is to let that be spent on quality instead.
+        //
+        // Committed on release like the resolution slider above, and for the same reason: every
+        // distinct value builds or hands back a feature, and doing that on each pixel of a drag is
+        // felt as the frame hitching.
+        {
+            const bool modelUpscaling = config->DlssNrModelUpscale.value_or_default() &&
+                                        config->DlssNrWorkingScale.value_or_default() < 0.999f;
+
+            ImGui::BeginDisabled(modelUpscaling);
+
+            static int pendingPasses = -1;
+
+            int passes = pendingPasses >= 0 ? pendingPasses
+                                            : (int) config->DlssNrPasses.value_or_default();
+
+            if (ImGui::SliderInt("Model passes", &passes, 1, 10, passes == 1 ? "%d pass" : "%d passes"))
+                pendingPasses = passes;
+
+            if (ImGui::IsItemDeactivatedAfterEdit() && pendingPasses >= 0)
+            {
+                config->DlssNrPasses = (uint32_t) std::clamp(pendingPasses, 1, 10);
+                pendingPasses = -1;
+            }
+
+            ImGui::EndDisabled();
+
+            if (modelUpscaling)
+                ImGui::TextDisabled("Unavailable while the model is upscaling: its answer is already"
+                                    " full size,
+so a second pass would run at the display's"
+                                    " resolution.");
+        }
+
+        HelpMarker("How many times the model runs over the frame, one pass after another, before its"
+                       "
+answer is composed back on."
+                       "
+
+Each pass reads the pass before it, so the model is handed a picture it has"
+                       "
+already cleaned and cleans it again. Where one pass leaves noise or an"
+                       "
+unresolved surface it half-recognised, a second sees a clearer picture to work"
+                       "
+from."
+                       "
+
+It costs a full model evaluate per pass, which is why this belongs beside the"
+                       "
+resolution slider rather than on its own: the trade is passes against pixels."
+                       "
+The model's time grows with the AREA, so three passes at 50% resolution is"
+                       "
+about three quarters of one pass at 100% -- and at 50% before the upscale,"
+                       "
+about three quarters of a quarter. That is the budget this exists to spend."
+                       "
+
+Every extra pass gets its OWN model instance, each with its own history. One"
+                       "
+instance run three times in a frame is told three frames passed with nothing"
+                       "
+moving between them, and fights itself from the second run on -- which is what"
+                       "
+'loses detail on later passes' was the last time this was tried. The cost of"
+                       "
+doing it properly is video memory: an instance's worth per pass."
+                       "
+
+Building a pass costs one frame without the model, exactly as changing"
+                       "
+resolution does. 1 is the shipped behaviour.");
+
         {
             bool compact = config->DlssNrCompactProxy.value_or_default();
             if (ImGui::Checkbox("Compact model surfaces", &compact))
@@ -546,6 +622,22 @@ void RenderMenu(Config* config, float menuResScale)
                     ImGui::TextDisabled("The model is working at %ux%u, on a %ux%u frame.",
                                         sizes.modelWidth, sizes.modelHeight, sizes.frameWidth,
                                         sizes.frameHeight);
+
+                // What is actually running, which is not always what the slider asks for: a pass whose
+                // instance or staging surface would not allocate is dropped, and saying so here is the
+                // difference between a shorter chain and a silent one.
+                const unsigned int asked =
+                    std::clamp<unsigned int>(config->DlssNrPasses.value_or_default(), 1u, 10u);
+
+                if (sizes.passes > 1 || asked > 1)
+                {
+                    if (sizes.passes < asked)
+                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f),
+                                           "Running %u of the %u passes asked for -- the rest would not"
+                                           " build.", sizes.passes, asked);
+                    else
+                        ImGui::TextDisabled("Running %u passes over it.", sizes.passes);
+                }
             }
         }
 

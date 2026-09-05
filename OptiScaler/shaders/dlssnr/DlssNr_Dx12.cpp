@@ -197,6 +197,10 @@ struct TuningSnapshot
     }
 };
 
+// The most passes the model may be asked to make over one frame. Ten because that is what the setting
+// offers; the array below is indexed by pass number with [0] unused, so this is also its length.
+constexpr unsigned int kMaxNrPasses = 10;
+
 struct NrState
 {
     HMODULE forwarder = nullptr;
@@ -255,11 +259,29 @@ struct NrState
     //
     // Indexed by pass, so [0] is unused and the first extra pass is [1]. Wasting one pointer keeps
     // every index here equal to the pass number it belongs to.
-    void* passFeature[4] = {};
+    void* passFeature[kMaxNrPasses] = {};
+
+    // How many passes those features were built for, so a change to the setting can be noticed and the
+    // now-unwanted ones handed back rather than left holding video memory for a pass that never runs.
+    unsigned int builtPasses = 1;
+
+    // The first pass index that would not build, remembered so it is not asked for again.
+    //
+    // Without this a refusal is permanent AND repeating: the build frame does not evaluate, so a pass
+    // that fails every frame is a pass that never runs the model at all. The same shape as the
+    // upscaling refusal above, and for the same reason. Reset whenever the features are torn down,
+    // since what the driver will give us can change with them.
+    unsigned int passCeiling = kMaxNrPasses;
 
     // The model cannot read and write one resource, so the frame is staged through these.
     ID3D12Resource* colorCopy = nullptr;
     ID3D12Resource* output = nullptr;
+
+    // The other half of the multi-pass ping-pong. A pass cannot read and write one surface either, so
+    // the chain alternates between this and the output, arranged so the LAST pass always lands in the
+    // output -- everything downstream already knows where to find the answer. Allocated only when more
+    // than one pass is asked for.
+    ID3D12Resource* passBuf = nullptr;
 
     // The frame as the upscaler wrote it. The resolve adds the model's edit to this rather than
     // reconstructing it by inverting the tone curve, which is what turned every light in the frame into
@@ -898,8 +920,10 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
     for (void*& f : g_nr.passFeature)
         ParkNrFeature(f);
 
+    g_nr.passCeiling = kMaxNrPasses;
+
     for (ID3D12Resource** r :
-         { &g_nr.output, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall })
+         { &g_nr.output, &g_nr.passBuf, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall })
         ParkNrResource(*r);
 
     g_nr.reset = true;
@@ -2236,6 +2260,18 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
+    // How many times the model runs over the frame before the answer is composed.
+    //
+    // Not when the model is doing the upscaling. There its answer already comes back at the frame's
+    // size, so a second pass would read a full-resolution picture and cost what running the model
+    // reduced was meant to save -- the exact opposite of the point. Silently one pass rather than an
+    // error: the two settings are independent controls and either may be moved without the other.
+    unsigned int wantPasses = cfg.DlssNrPasses.value_or_default();
+    wantPasses = wantPasses < 1 ? 1 : (wantPasses > kMaxNrPasses ? kMaxNrPasses : wantPasses);
+
+    if (modelUpscale)
+        wantPasses = 1;
+
     // What the model writes into: the frame's size when it upscales, its own working size otherwise.
     const unsigned int answerWidth = modelUpscale ? width : workWidth;
     const unsigned int answerHeight = modelUpscale ? height : workHeight;
@@ -2341,11 +2377,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         for (void*& f : g_nr.passFeature)
             ParkNrFeature(f);
 
+        g_nr.passCeiling = kMaxNrPasses;
+
         // Only a resolution change invalidates the scratch textures. Tuning does not, and throwing
         // them away for it would mean a reallocation every time a slider moves.
         if (resolutionChanged)
         {
             ParkNrResource(g_nr.output);
+            ParkNrResource(g_nr.passBuf);
             ParkNrResource(g_nr.colorCopy);
             ParkNrResource(g_nr.hdrCopy);
             ParkNrResource(g_nr.colorSmall);
@@ -2376,6 +2415,24 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         g_nr.workWidth = workWidth;
         g_nr.workHeight = workHeight;
+    }
+
+    // The ping-pong partner, and only while more than one pass is asked for. Same format as the output
+    // it alternates with -- ProxyFormatOf reports what the output actually got, which is not always
+    // what was asked for, and two surfaces the model writes in turn have to agree.
+    if (wantPasses > 1 && g_nr.passBuf == nullptr && g_nr.output != nullptr)
+    {
+        g_nr.passBuf =
+            CreateScratch(device, ProxyFormatOf(g_nr.output, desc.Format), answerWidth, answerHeight);
+
+        if (g_nr.passBuf == nullptr)
+            LOG_WARN("DLSS-NR: the multi-pass staging surface could not be allocated; running one pass");
+    }
+    else if (wantPasses <= 1 && g_nr.passBuf != nullptr)
+    {
+        // Handed back the moment it stops being wanted. It is a full model-sized surface and nothing
+        // else reads it.
+        ParkNrResource(g_nr.passBuf);
     }
 
     if (g_nr.colorCopy == nullptr)
@@ -2618,6 +2675,77 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
         device->Release();
         return false;
+    }
+
+    // A chain with nowhere to stage its intermediate answers is one pass, whatever was asked for.
+    if (g_nr.passBuf == nullptr)
+        wantPasses = 1;
+
+    // The extra passes' features.
+    //
+    // Each pass gets its own, because one feature run several times in a frame is told several frames
+    // passed with nothing moving between them and fights its own history from the second run on. A
+    // feature apiece sees one frame per frame, which is the contract it was built for.
+    //
+    // Built here rather than beside the evaluate, and on a frame that then does not evaluate at all --
+    // creating and evaluating a feature on one command list is the dice roll that hung the GPU, and it
+    // is exactly what re-opened that hang the last time multi-pass existed. The build costs one frame
+    // without the model, the same frame the main feature's own build costs, and that is invisible.
+    for (unsigned int i = wantPasses; i < kMaxNrPasses; ++i)
+        ParkNrFeature(g_nr.passFeature[i]);
+
+    if (wantPasses > 1)
+    {
+        bool builtAny = false;
+
+        auto extraSnippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
+
+        if (!extraSnippet.has_value())
+            extraSnippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+
+        for (unsigned int i = 1; i < wantPasses && i < g_nr.passCeiling && extraSnippet.has_value(); ++i)
+        {
+            if (g_nr.passFeature[i] != nullptr)
+                continue;
+
+            SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+
+            // Same size and same tuning as the first pass. It reads the first pass's answer, which is
+            // the working size, and writes another of the same -- there is no scaling anywhere in the
+            // chain.
+            g_nr.passFeature[i] = g_nr.create(
+                extraSnippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
+                (int) cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
+                (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+                cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+
+            builtAny = true;
+
+            if (g_nr.passFeature[i] == nullptr)
+            {
+                // Not a failure worth losing the pass over: the chain simply stops one short. Reported
+                // once per build so a video-memory ceiling shows up as a message rather than as a
+                // silently shorter chain.
+                LOG_WARN("DLSS-NR: pass {} of {} would not build at {}x{} (create 0x{:X}); the chain "
+                         "will run as far as it got", i + 1, wantPasses, workWidth, workHeight,
+                         (unsigned int) (g_nr.lastCreate != nullptr ? *g_nr.lastCreate : 0));
+
+                // Not asked for again until something tears the features down. Retrying it every frame
+                // would mean never evaluating at all, since a build frame does not.
+                g_nr.passCeiling = i;
+                break;
+            }
+        }
+
+        if (builtAny)
+        {
+            // Nothing evaluates on a frame that created a feature. See above.
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, targetArrival);
+            device->Release();
+            return false;
+        }
     }
 
     // The upscaler has just written this, so it is a UAV. The model needs it readable.
@@ -3140,33 +3268,113 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_ngxTime != nullptr)
         g_ngxTime->Start(cmdList);
 
-    // Multi-pass was removed: re-feeding the model its own output re-opened the same-command-list
-    // feature-creation hang, and the colour core is not settled enough to build on. One evaluate.
     const bool resetThisFrame = g_nr.reset;
 
-    // Two sizes when the feature was built to upscale, one when it was not. builtScaled rather than
-    // the setting, because the setting can move between a create and an evaluate and the feature is
-    // whatever it was actually built as.
-    const int result =
-        g_nr.builtScaled
-            ? g_nr.evaluateScaled(
-                  cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn,
-                  g_nr.output, g_nr.builtInWidth, g_nr.builtInHeight, width, height, guideWidth,
-                  guideHeight, g_nr.guideDepthInverted ? 1 : 0, g_nr.reset ? 1 : 0,
-                  cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-                  cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-                  cfg.DlssNrSkinStructure.value_or_default(),
-                  cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
-                  g_nr.guideMvScaleY * mvToWork)
-            : g_nr.evaluate(
-                  cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn,
-                  g_nr.output, workWidth, workHeight, guideWidth, guideHeight,
-                  g_nr.guideDepthInverted ? 1 : 0, g_nr.reset ? 1 : 0,
-                  cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-                  cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-                  cfg.DlssNrSkinStructure.value_or_default(),
-                  cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
-                  g_nr.guideMvScaleY * mvToWork);
+    // How many passes actually run: what was asked for, cut short at the first feature that is not
+    // there. Read off the features rather than off the setting, so a build that stopped one short
+    // runs the chain it has instead of dereferencing a hole in the middle of it.
+    unsigned int passes = 1;
+
+    while (passes < wantPasses && g_nr.passFeature[passes] != nullptr)
+        ++passes;
+
+    if (g_nr.builtPasses != passes)
+    {
+        g_nr.builtPasses = passes;
+        LOG_INFO("DLSS-NR: {} pass{} over a {}x{} frame", passes, passes == 1 ? "" : "es", workWidth,
+                 workHeight);
+    }
+
+    // The chain, and where each link writes.
+    //
+    // A pass cannot read and write one surface, so the answers alternate between the output and the
+    // staging surface. The parity is arranged so the LAST pass always lands in the output: everything
+    // downstream -- the resolve, the down-leg, the capture -- already knows to look there, and none of
+    // it should have to care how many passes ran. With one pass this reduces to writing the output
+    // directly, which is exactly what it did before.
+    ID3D12Resource* const chain[2] = { g_nr.output, g_nr.passBuf };
+    auto slotOf = [passes](unsigned int pass) { return (pass + passes - 1u) & 1u; };
+
+    // Which of the two the model is currently allowed to read. Both start writable, and anything left
+    // readable at the end of the chain is put back before the resolve runs.
+    bool readable[2] = { false, false };
+
+    int result = 1;
+
+    for (unsigned int pass = 0; pass < passes; ++pass)
+    {
+        // The first pass reads the picture that was prepared for it; every pass after reads the one
+        // before it, which has to stop being a render target first.
+        ID3D12Resource* src = modelInput;
+
+        if (pass != 0)
+        {
+            const unsigned int srcSlot = slotOf(pass - 1u);
+            src = chain[srcSlot];
+
+            if (!readable[srcSlot])
+            {
+                Barrier(cmdList, src, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                readable[srcSlot] = true;
+            }
+        }
+
+        const unsigned int dstSlot = slotOf(pass);
+        ID3D12Resource* dst = chain[dstSlot];
+
+        if (readable[dstSlot])
+        {
+            Barrier(cmdList, dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            readable[dstSlot] = false;
+        }
+
+        // Its own feature per pass, so each one's history sees one frame per frame. The reset flag goes
+        // to all of them: a cut is a cut for every history in the chain, not only the first.
+        void* feature = pass == 0 ? g_nr.feature : g_nr.passFeature[pass];
+
+        // Two sizes when the feature was built to upscale, one when it was not. builtScaled rather
+        // than the setting, because the setting can move between a create and an evaluate and the
+        // feature is whatever it was actually built as. Only the first pass can be a scaled one --
+        // upscaling and multi-pass are mutually exclusive above, so this branch never runs past pass 0.
+        result =
+            g_nr.builtScaled
+                ? g_nr.evaluateScaled(
+                      cmdList, feature, g_nr.capabilityParams, src, depthIn, motionIn, dst,
+                      g_nr.builtInWidth, g_nr.builtInHeight, width, height, guideWidth, guideHeight,
+                      g_nr.guideDepthInverted ? 1 : 0, resetThisFrame ? 1 : 0,
+                      cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                      cfg.DlssNrLocalStructure.value_or_default(),
+                      cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                      cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
+                      g_nr.guideMvScaleY * mvToWork)
+                : g_nr.evaluate(
+                      cmdList, feature, g_nr.capabilityParams, src, depthIn, motionIn, dst, workWidth,
+                      workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
+                      resetThisFrame ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
+                      (int) cfg.DlssNrStyle.value_or_default(),
+                      cfg.DlssNrLocalStructure.value_or_default(),
+                      cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                      cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
+                      g_nr.guideMvScaleY * mvToWork);
+
+        // A failed link poisons the rest of the chain -- the next pass would read a surface the model
+        // never wrote. Stop here and let the failure be reported below, once, as it always was.
+        // The restore loop below runs either way, so a break leaves nothing half-transitioned.
+        if (result != 1)
+            break;
+    }
+
+    // Put the staging surfaces back the way the rest of the frame expects to find them. The output is
+    // barriered to readable again by the resolve itself, which is why it is restored here first rather
+    // than left half-way.
+    for (unsigned int slot = 0; slot < 2; ++slot)
+    {
+        if (readable[slot] && chain[slot] != nullptr)
+            Barrier(cmdList, chain[slot], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
 
     if (g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
@@ -3956,6 +4164,7 @@ NrSizes Sizes()
     s.upscaling = g_nr.builtScaled;
     s.upscalingRefused = g_nr.scaledRefused;
     s.ratiosKnown = g_nr.ratiosKnown;
+    s.passes = g_nr.builtPasses;
 
     for (int i = 0; i < 6; ++i)
         s.ratios[i] = g_nr.ratios[i];
@@ -4042,6 +4251,12 @@ void Shutdown()
     {
         g_nr.output->Release();
         g_nr.output = nullptr;
+    }
+
+    if (g_nr.passBuf != nullptr)
+    {
+        g_nr.passBuf->Release();
+        g_nr.passBuf = nullptr;
     }
 
     for (ID3D12Resource*& a : g_nr.accum)

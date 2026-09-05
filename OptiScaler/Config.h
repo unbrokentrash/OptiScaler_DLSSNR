@@ -398,6 +398,21 @@ class Config
     // untouched whatever this is set to. 1.0 is full resolution and behaves exactly as before.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
 
+    // How many times the model runs over the frame, one after another, before its answer is composed.
+    //
+    // Each pass reads the previous pass's answer, so the model sees a picture it has already cleaned
+    // and cleans it again. Costs one full model evaluate per pass, which is the whole reason this is
+    // only worth having when the model is running on a reduced frame -- three passes at 50% is still
+    // cheaper than one at 100%, and that is the trade this exists to let you make.
+    //
+    // Every extra pass gets its OWN feature, not a second run of the first one. A single feature told
+    // three times that a frame passed, with the same motion vectors each time, fights its own history
+    // from the second pass on; separate features each see one frame per frame, which is the contract
+    // they were built for. The cost is memory: a feature's worth per pass.
+    //
+    // 1 is the shipped behaviour and is bit-identical to having no setting at all.
+    CustomOptional<uint32_t> DlssNrPasses { 1 };
+
     // What the model's edit is scaled by before the upscaler downstream discards part of it. Applied
     // only when the pass runs before the upscale, where its output is an upscaler input rather than
     // the finished frame.
