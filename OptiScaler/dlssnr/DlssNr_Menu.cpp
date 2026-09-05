@@ -459,50 +459,30 @@ void RenderMenu(Config* config, float menuResScale)
 
             if (modelUpscaling)
                 ImGui::TextDisabled("Unavailable while the model is upscaling: its answer is already"
-                                    " full size,
-so a second pass would run at the display's"
+                                    " full size,\nso a second pass would run at the display's"
                                     " resolution.");
         }
 
         HelpMarker("How many times the model runs over the frame, one pass after another, before its"
-                       "
-answer is composed back on."
-                       "
-
-Each pass reads the pass before it, so the model is handed a picture it has"
-                       "
-already cleaned and cleans it again. Where one pass leaves noise or an"
-                       "
-unresolved surface it half-recognised, a second sees a clearer picture to work"
-                       "
-from."
-                       "
-
-It costs a full model evaluate per pass, which is why this belongs beside the"
-                       "
-resolution slider rather than on its own: the trade is passes against pixels."
-                       "
-The model's time grows with the AREA, so three passes at 50% resolution is"
-                       "
-about three quarters of one pass at 100% -- and at 50% before the upscale,"
-                       "
-about three quarters of a quarter. That is the budget this exists to spend."
-                       "
-
-Every extra pass gets its OWN model instance, each with its own history. One"
-                       "
-instance run three times in a frame is told three frames passed with nothing"
-                       "
-moving between them, and fights itself from the second run on -- which is what"
-                       "
-'loses detail on later passes' was the last time this was tried. The cost of"
-                       "
-doing it properly is video memory: an instance's worth per pass."
-                       "
-
-Building a pass costs one frame without the model, exactly as changing"
-                       "
-resolution does. 1 is the shipped behaviour.");
+                       "\nanswer is composed back on."
+                       "\n\nEach pass reads the pass before it, so the model is handed a picture it has"
+                       "\nalready cleaned and cleans it again. Where one pass leaves noise or an"
+                       "\nunresolved surface it half-recognised, a second sees a clearer picture to"
+                       "\nwork from."
+                       "\n\nIt costs a full model evaluate per pass, which is why this belongs beside"
+                       "\nthe resolution slider rather than on its own: the trade is passes against"
+                       "\npixels. The model's time grows with the AREA, so three passes at 50%"
+                       "\nresolution is about three quarters of one pass at 100% -- and at 50% before"
+                       "\nthe upscale, about three quarters of a quarter. That is the budget this"
+                       "\nexists to spend."
+                       "\n\nEvery extra pass gets its OWN model instance, each with its own history."
+                       "\nOne instance run three times in a frame is told three frames passed with"
+                       "\nnothing moving between them, and fights itself from the second run on --"
+                       "\nwhich is what 'loses detail on later passes' was the last time this was"
+                       "\ntried. The cost of doing it properly is video memory: an instance's worth"
+                       "\nper pass."
+                       "\n\nBuilding a pass costs one frame without the model, exactly as changing"
+                       "\nresolution does. 1 is the shipped behaviour.");
 
         {
             bool compact = config->DlssNrCompactProxy.value_or_default();
