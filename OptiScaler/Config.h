@@ -398,21 +398,6 @@ class Config
     // untouched whatever this is set to. 1.0 is full resolution and behaves exactly as before.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
 
-    // How many times the model runs over the frame, one after another, before its answer is composed.
-    //
-    // Each pass reads the previous pass's answer, so the model sees a picture it has already cleaned
-    // and cleans it again. Costs one full model evaluate per pass, which is the whole reason this is
-    // only worth having when the model is running on a reduced frame -- three passes at 50% is still
-    // cheaper than one at 100%, and that is the trade this exists to let you make.
-    //
-    // Every extra pass gets its OWN feature, not a second run of the first one. A single feature told
-    // three times that a frame passed, with the same motion vectors each time, fights its own history
-    // from the second pass on; separate features each see one frame per frame, which is the contract
-    // they were built for. The cost is memory: a feature's worth per pass.
-    //
-    // 1 is the shipped behaviour and is bit-identical to having no setting at all.
-    CustomOptional<uint32_t> DlssNrPasses { 1 };
-
     // What the model's edit is scaled by before the upscaler downstream discards part of it. Applied
     // only when the pass runs before the upscale, where its output is an upscaler input rather than
     // the finished frame.
@@ -582,11 +567,19 @@ class Config
     // 1 is what the model was trained for and what every published number describes. Above that it
     // is being asked to enhance its own output, which is outside its training distribution: detail
     // compounds, and so does anything it got wrong. Two often looks richer. Four usually looks
-    // synthetic. Eight is there because somebody will want to see it.
+    // synthetic. Ten is there because somebody will want to see it.
     //
-    // The cost is exactly linear -- the model is 98% of the frame's expense and every pass pays it
-    // again -- so 8 costs eight times, near enough. There is no shortcut and no amortisation: the
-    // passes are sequential and each one needs the last one's output.
+    // The cost is exactly linear -- the model is 99% of the frame's expense and every pass pays it
+    // again -- so 10 costs ten times, near enough. There is no shortcut and no amortisation: the
+    // passes are sequential and each one needs the last one's output. Which is why this belongs with
+    // the reduced placements rather than against them: three passes at half resolution is about
+    // three quarters of one pass at full, and that is the trade it exists to let you make.
+    //
+    // Every extra pass gets its OWN model instance, not a second call into the first. One instance
+    // told three times that a frame passed, with the same motion vectors each time, fights its own
+    // history from the second run on -- which is what "loses detail on later passes" was. Separate
+    // instances each see one frame per frame, which is the contract they were built for, and the
+    // cost of that is an instance's worth of video memory per pass.
     CustomOptional<uint32_t> DlssNrPasses { 1 };
 
     // Which depth convention the model is told the guide uses.
