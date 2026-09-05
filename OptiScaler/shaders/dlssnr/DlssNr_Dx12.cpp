@@ -3804,11 +3804,24 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             probeParams.Height = 1;
 
             // target carries the composed frame and goes in through the exposure slot, which the
-            // probe has no other use for. It is a UAV the resolve has just written; reading it as an
-            // SRV in the same command list is exactly what the resolve already does with its own
-            // inputs, and nothing else touches it between the two dispatches.
+            // probe has no other use for.
+            //
+            // Transitioned first, and the omission of this is what made the first attempt report a
+            // composed frame 256% different from the game's. The resolve has just written target as
+            // an unordered access; reading it through an SRV in that state is undefined, and it
+            // duly returned something that was neither the composed frame nor noise. Every other
+            // read in this pass is barriered before it -- this one was written as though it were
+            // already readable because the resolve's own inputs are, and they are because something
+            // moved them.
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
             DispatchPass(cmdList, probeParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, nullptr,
                          target, g_nr.meter, nullptr);
+
+            // Back where the exit barriers expect to find it.
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
             CopyMeterToReadback(cmdList, device, false, true);
             ConsumeMeterReadback();
