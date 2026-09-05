@@ -305,6 +305,24 @@ class Config
     // goes in a real title.
     CustomOptional<uint32_t> DlssNrDejitter { 0 };
 
+    // What the upscaler is handed when the pass runs before it: the frame plus the model's edit, or
+    // the model's picture.
+    //
+    // The composition does not add an edit onto the frame by default. It returns the model's answer as
+    // a complete picture with its luminance re-anchored per pixel -- so at the shipped strengths the
+    // output IS the model's picture, and the frame contributes its luminance and nothing else.
+    //
+    // After the upscale that is a defensible way to compose a finished frame. Before it, the game's
+    // upscaler is then handed the model's reconstruction of a proxy -- tone-curved into [0,1], round
+    // tripped through an sRGB surface, un-curved by a luminance rescale rather than by inverting the
+    // curve -- and accumulates it temporally. That is the placement difference that was blamed on
+    // resolution for a long time, and it is not the model's doing.
+    //
+    // On, the resolve rebuilds the frame's own proxy and carries only the model's difference onto it,
+    // so the upscaler receives the game's own frame with the model's edit on it. Off is the old
+    // behaviour, kept because it is the only way to see what this was.
+    CustomOptional<bool> DlssNrCarryEdit { true };
+
     // Run a second DLSS, at a 1:1 ratio, over the model's input before the model sees it.
     //
     // Running the model before the upscale is the only affordable placement -- cost is the frame's

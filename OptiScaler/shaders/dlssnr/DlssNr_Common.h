@@ -229,18 +229,22 @@ struct alignas(256) DlssNrConstants
     float AccumAlpha;
     uint32_t AccumMv;
 
-    // Whether the picture the model was shown is this frame's own proxy, or a different one.
+    // Hand back the frame plus the model's edit, rather than the model's picture.
     //
-    // Set whenever something replaced the model's input at full size -- the frame-averaging
-    // accumulation, or the DLSS prepass. The resolve cannot tell from the resources: a substituted
-    // input is the same size and format as the one it stands in for, so only the host knows.
+    // The composition does not add an edit onto the frame by default -- it returns the model's answer
+    // as a complete picture with its luminance re-anchored. At the shipped strengths the output IS the
+    // model's picture; the frame contributes its luminance and nothing else.
     //
-    // It matters because the composition hands back the model's PICTURE, luminance-anchored to the
-    // frame, rather than adding an edit onto it. Under that arithmetic anything done to the model's
-    // input arrives in the player's frame. With this set the resolve rebuilds the frame's own proxy
-    // and carries only the model's difference onto it, so the substitution cancels and the pass does
-    // what it says: shows the model a better picture without swapping the one on screen.
-    uint32_t InputSubstituted;
+    // Before the upscale that means the game's upscaler is handed the model's reconstruction of a
+    // proxy instead of the game's own frame, and accumulates it. With this set the resolve rebuilds
+    // the frame's own proxy and carries only the model's difference onto it, so the frame keeps its
+    // own picture and the model contributes exactly what it changed.
+    //
+    // It also makes anything that replaced the model's INPUT cancel -- the frame-averaging
+    // accumulation, the DLSS prepass -- since the substitution is then present on both sides of the
+    // difference. Those are invisible to the resolve otherwise: a substitute is the same size and
+    // format as the picture it stands in for, so only the host knows.
+    uint32_t CarryEdit;
 };
 
 class DlssNr_Common

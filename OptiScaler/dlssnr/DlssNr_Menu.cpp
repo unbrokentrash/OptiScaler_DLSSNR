@@ -122,6 +122,46 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nDirect3D 12 only -- a game on the native Vulkan path runs after the upscale"
                        "\nwhatever this says. Changing it rebuilds the model, so the picture pauses.");
 
+        // Directly under the placement toggle, because it decides what that placement actually hands
+        // over -- which turns out to matter more than anything else on this panel.
+        {
+            const bool before = config->DlssNrBeforeUpscale.value_or_default();
+            ImGui::BeginDisabled(!before);
+
+            static const char* carryNames[] = { "The model's picture (old)", "The frame + the model's edit" };
+            int carry = config->DlssNrCarryEdit.value_or_default() ? 1 : 0;
+
+            ImGui::PushItemWidth(260.0f * menuResScale);
+
+            if (ImGui::Combo("The upscaler receives", &carry, carryNames, IM_ARRAYSIZE(carryNames)))
+                config->DlssNrCarryEdit = carry != 0;
+
+            ImGui::PopItemWidth();
+            ImGui::EndDisabled();
+        }
+
+        HelpMarker("What this pass actually hands to the game's upscaler. Read this one before the"
+                       "\nothers -- it explains more of the placement difference than resolution does."
+                       "\n\nThe composition does NOT add an edit onto the frame by default. It returns"
+                       "\nthe model's answer as a complete picture with its luminance re-anchored per"
+                       "\npixel. At the shipped strengths the output IS the model's picture; the frame"
+                       "\ncontributes its luminance and nothing else -- not its detail, not its"
+                       "\nprecision, not the values the proxy's curve could not represent."
+                       "\n\nAfter the upscale that is a reasonable way to compose a finished frame."
+                       "\nBEFORE it, the upscaler is handed the model's reconstruction of a proxy --"
+                       "\ntone-curved into 0..1, round-tripped through an sRGB surface, un-curved by a"
+                       "\nluminance rescale rather than by inverting the curve -- and then accumulates"
+                       "\nit temporally. That is the placement difference that was blamed on"
+                       "\nresolution for a long time, and it was never the model's doing."
+                       "\n\n\"The frame + the model's edit\" rebuilds the frame's own proxy in the"
+                       "\nresolve and carries only the model's DIFFERENCE onto it. The upscaler then"
+                       "\nreceives the game's own frame with the model's edit on it, at the game's own"
+                       "\nprecision. It also makes the input-cleaning options below cancel properly:"
+                       "\nthey are then present on both sides of that difference."
+                       "\n\n\"The model's picture (old)\" is what this did before. Kept because it is"
+                       "\nthe only way to see what was happening, and because the two are a real A/B."
+                       "\n\nMeaningless after the upscale, where there is no upscaler downstream.");
+
         // Only meaningful on the pre-upscale side, and dimmed rather than hidden on the other so the
         // reason it does nothing there is visible.
         {

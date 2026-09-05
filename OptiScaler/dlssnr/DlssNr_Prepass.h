@@ -24,7 +24,7 @@
 // a pass meant to clean the model's input would instead be replacing the frame with its own
 // reconstruction. That is exactly what the first version of this did.
 //
-// The resolve is now told when the model's input was substituted (DlssNrConstants::InputSubstituted),
+// The resolve is now told when the model's input was substituted (DlssNrConstants::CarryEdit),
 // and on that flag it rebuilds the frame's own proxy and carries only the model's DIFFERENCE onto it.
 // THEN this cancels: it is present in the model's answer and in the picture that answer is measured
 // against, so it subtracts out. With that in place the pass has one job, to give the model something
