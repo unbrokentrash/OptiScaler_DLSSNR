@@ -635,9 +635,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     //   x = 0  mean luminance of the picture the model was shown
     //   x = 1  mean luminance of the picture it returned
     //   x = 2  mean luminance of the untouched frame
-    //   x = 3  mean ABSOLUTE luminance difference between the first two
-    //   x = 4  mean ABSOLUTE luminance difference between the COMPOSED FRAME and the untouched one,
+    //   x = 3  mean RELATIVE luminance change the model made to its input
+    //   x = 4  mean RELATIVE luminance change the composed frame has against the untouched one,
     //          read through the exposure slot, which the probe has no other use for
+    //
+    // Both relative, per sample, and that matters: the first pair live in proxy space -- sRGB
+    // encoded, so already roughly perceptual -- while the second pair are raw linear light, where a
+    // tenth is about a thirtieth to the eye. Reported as absolute means, "the model rewrote 7%" and
+    // "the frame changed 10%" looked like the edit surviving intact when they are not measured in
+    // comparable units at all. Dividing each difference by the picture it is a difference FROM makes
+    // both scale-free, so the pair can be read as "this much went in, this much came out".
     //
     // The fourth is the one that matters and the first version of this did not have it. A ratio of
     // means cannot see what this model mostly does: it adds and removes local structure, and those
@@ -652,6 +659,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (gMode == 6)
     {
         const uint kGrid = 12u;
+
+        // Keeps a relative change finite where the picture has no light in it. The same floor the
+        // composition uses on its own ratios, and for the same reason.
+        const float kProbeFloor = 1.0 / 512.0;
         float sum = 0.0;
 
         for (uint sy = 0; sy < kGrid; ++sy)
@@ -676,7 +687,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 {
                     const float p = dot(max(gSource.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
                     const float m = dot(max(gModel.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
-                    sum += abs(m - p);
+                    sum += abs(m - p) / (p + kProbeFloor);
                 }
                 else
                 {
@@ -695,7 +706,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 #ifndef VK_MODE
                     const float o = dot(max(gOriginal.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
                     const float c = dot(max(gExposure.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
-                    sum += abs(c - o);
+                    sum += abs(c - o) / (o + kProbeFloor);
 #endif
                 }
             }

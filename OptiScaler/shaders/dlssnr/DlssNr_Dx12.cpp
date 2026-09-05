@@ -3838,28 +3838,30 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 // level. This is the number to compare between the two placements: the ratio of
                 // means above cannot see local structure, because adding detail here and removing
                 // it there cancels in an average.
-                const float editRel =
-                    g_nr.probeProxy > 1e-9f ? g_nr.probeEdit / g_nr.probeProxy : -1.0f;
+                // Both are already relative, per sample, and in comparable units -- so the pair
+                // reads directly as "this much went in, this much came out".
+                const float editRel = g_nr.probeEdit;
+                const float outRel = g_nr.probeOut;
 
-                // And how much of that survived into the frame this pass writes. Measured against the
-                // untouched frame, in the frame's own scale, so it is directly comparable with the
-                // edit above rather than with anything in proxy space.
-                const float outRel = g_nr.probeFrame > 1e-9f ? g_nr.probeOut / g_nr.probeFrame : -1.0f;
+                // What the composition kept. Below about a half means most of the model's work is
+                // not reaching the frame, whatever the composition mode claims to be doing.
+                const float kept = editRel > 1e-6f ? outRel / editRel : -1.0f;
 
-                LOG_INFO("DLSS-NR signal: proxy {:.4f} model {:.4f} | model rewrote {:.2f}% of its "
-                         "input | composed frame differs from the game's by {:.2f}% | mean shift "
+                LOG_INFO("DLSS-NR signal: proxy {:.4f} model {:.4f} | model changed its input by "
+                         "{:.2f}% | composed frame changed by {:.2f}% | kept {:.0f}% | mean shift "
                          "{:.4f}x, white point {:.3f}, model {}x{} on a {}x{} frame -- {}",
-                         g_nr.probeProxy, g_nr.probeModel, editRel * 100.0f, outRel * 100.0f, ratio,
-                         resolveParams.WhitePoint, workWidth, workHeight, width, height,
+                         g_nr.probeProxy, g_nr.probeModel, editRel * 100.0f, outRel * 100.0f,
+                         kept * 100.0f, ratio, resolveParams.WhitePoint, workWidth, workHeight, width,
+                         height,
                          g_nr.probeProxy < 0.005f
                              ? "PROXY IS BLACK -- the model is being shown nothing"
                          : editRel < 0.002f
                              ? "THE MODEL IS DOING ALMOST NOTHING"
-                         : outRel < 0.002f
-                             ? "THE COMPOSITION IS EATING THE EDIT -- the model worked, the frame did "
-                               "not change"
-                         : outRel < editRel * 0.25f
-                             ? "most of the model's work is being lost in the composition"
+                         : kept < 0.25f
+                             ? "THE COMPOSITION IS EATING THE EDIT -- most of the model's work is not "
+                               "reaching the frame"
+                         : kept > 1.75f
+                             ? "the composition is AMPLIFYING the edit"
                              : "the model's work is reaching the frame");
             }
         }
