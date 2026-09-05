@@ -3663,6 +3663,16 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             unsigned int residual;
             unsigned int workW;
             unsigned int workH;
+
+            // The three that decide whether the composition runs at all, and which were missing.
+            //
+            // Three rounds of changes to the composition were reported as "no difference at all" and
+            // no log could say why, because none of these was written down. A reversible REPLACE mode
+            // overwrites the composed result with the model's raw answer as the last statement in the
+            // shader -- so every control above it is inert while it is selected, and nothing said so.
+            unsigned int reversible;
+            unsigned int applyModel;
+            unsigned int compose;
         };
 
         static ComposeReport loggedCompose {};
@@ -3680,7 +3690,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                                          resolveParams.CompareMode,
                                          resolveParams.Transfer,
                                          g_nr.workWidth,
-                                         g_nr.workHeight };
+                                         g_nr.workHeight,
+                                         resolveParams.ReversibleMode,
+                                         resolveParams.ApplyModel,
+                                         resolveParams.ComposeMode };
 
         if (!loggedCompose.valid || loggedCompose.whitePoint != composeNow.whitePoint ||
             loggedCompose.transfer != composeNow.transfer || loggedCompose.colour != composeNow.colour ||
@@ -3689,7 +3702,10 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             loggedCompose.debugView != composeNow.debugView ||
             loggedCompose.compareMode != composeNow.compareMode ||
             loggedCompose.residual != composeNow.residual || loggedCompose.workW != composeNow.workW ||
-            loggedCompose.workH != composeNow.workH)
+            loggedCompose.workH != composeNow.workH ||
+            loggedCompose.reversible != composeNow.reversible ||
+            loggedCompose.applyModel != composeNow.applyModel ||
+            loggedCompose.compose != composeNow.compose)
         {
             loggedCompose = composeNow;
             LOG_INFO("DLSS-NR composition: paper white {:.2f}x, detail {:.2f}, colour {:.2f}, guard "
@@ -3698,6 +3714,21 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                      composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
                      composeNow.residual == 1 ? "matched residual" : "classic", composeNow.workW,
                      composeNow.workH, composeNow.debugView, composeNow.compareMode);
+
+            // Said separately and in plain words, because this is the line that would have ended the
+            // last three rounds on the first log.
+            static const char* const kComposeNames[] = { "the model's picture", "rebuilt proxy + edit",
+                                                         "frame x the model's change" };
+            const unsigned int composeIdx = composeNow.compose < 3u ? composeNow.compose : 0u;
+            const bool replacing = composeNow.reversible == 2 || composeNow.reversible == 4;
+
+            LOG_INFO("DLSS-NR output: reversible mode {} ({}), apply model {}, composition {} ({})",
+                     composeNow.reversible,
+                     replacing ? "REPLACE -- the composition is DISCARDED and the model's raw answer "
+                                 "is the frame, so every composition control is inert"
+                               : "composed",
+                     composeNow.applyModel, composeNow.compose,
+                     replacing ? "not reached" : kComposeNames[composeIdx]);
         }
 
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,

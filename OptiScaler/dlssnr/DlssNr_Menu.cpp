@@ -169,7 +169,11 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nis the IDENTITY -- fullProxy + (model - proxy) is model -- so it is not a fix"
                        "\nfor the placement on its own, and it was shipped once as though it were."
                        "\n\n\"The model's picture (old)\" is what this always did, kept as the A/B."
-                       "\n\nMeaningless after the upscale, which always uses the old path.");
+                       "\n\nMeaningless after the upscale, which always uses the old path."
+                       "\n\nAND: a reversible REPLACE mode discards the composition entirely -- the"
+                       "\nmodel's raw answer becomes the frame and this control does nothing at all."
+                       "\nIf this reads as \"no difference\", check the Reversible proxy setting"
+                       "\nfurther down before anything else.");
 
         // Only meaningful on the pre-upscale side, and dimmed rather than hidden on the other so the
         // reason it does nothing there is visible.
@@ -875,6 +879,20 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::Combo("Reversible proxy (experimental)", &reversible, reversibleNames,
                          IM_ARRAYSIZE(reversibleNames)))
             config->DlssNrReversibleMode = (uint32_t) reversible;
+
+        // Unmissable, because a REPLACE mode silently disables every composition control on this
+        // panel -- it overwrites the composed result with the model's raw answer as the last
+        // statement in the shader. Three rounds of composition work read as "no difference at all"
+        // with this selected, and nothing anywhere said why.
+        if (reversible == 2 || reversible == 4)
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f),
+                               "REPLACE: the composition is discarded. The model's raw answer IS the"
+                               "\nframe, so paper white, detail, colour, the guard, Enlargement and"
+                               "\n\"The upscaler receives\" all do nothing while this is selected."
+                               "\nBefore the upscale that hands DLSS the model's picture with no"
+                               "\nframe in it at all. Use it to look, not to run.");
+        }
 
         HelpMarker("What the model is shown, and how its answer comes back."
                        "\n\nOff (soft knee): the default. It rolls highlights off so hard the model"
