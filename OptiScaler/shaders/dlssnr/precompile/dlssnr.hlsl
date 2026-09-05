@@ -630,6 +630,48 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         return;
     }
 
+    // Three numbers, so that "no visual change" stops being a thing anyone has to reason about.
+    //
+    // Four rounds of composition work have now been reported as no difference, and every hypothesis
+    // for why was argued from the source rather than measured. Nothing in this pass has ever said what
+    // magnitude the pictures it handles actually are -- so a proxy that came out black, or a model
+    // answer identical to its input, would look exactly like a composition bug and could not be told
+    // apart from one.
+    //
+    //   x = 0  the picture the model was shown
+    //   x = 1  the picture it returned
+    //   x = 2  the untouched frame
+    //
+    // Mean luminance over a fixed 8x8 grid of samples, which is resolution-independent and enough to
+    // tell 0.4 from 0.0004. The first two are in proxy space and directly comparable to each other:
+    // their ratio IS how much the model changed the picture. The third is the frame in its own linear
+    // scale, and says whether the encode was handed something sane to begin with.
+    if (gMode == 6)
+    {
+        float sum = 0.0;
+
+        [unroll] for (uint sy = 0; sy < 8u; ++sy)
+        {
+            [unroll] for (uint sx = 0; sx < 8u; ++sx)
+            {
+                const float2 st = (float2(sx, sy) + 0.5) / 8.0;
+                float3 c;
+
+                if (id.x == 0u)
+                    c = gSource.SampleLevel(gLinear, st, 0).rgb;
+                else if (id.x == 1u)
+                    c = gModel.SampleLevel(gLinear, st, 0).rgb;
+                else
+                    c = gOriginal.SampleLevel(gLinear, st, 0).rgb;
+
+                sum += dot(max(c, float3(0.0, 0.0, 0.0)), kLuma);
+            }
+        }
+
+        gTarget[uint2(id.x, 0u)] = float4(sum / 64.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
     if (gMode == 4)
     {
         uint fullW, fullH;

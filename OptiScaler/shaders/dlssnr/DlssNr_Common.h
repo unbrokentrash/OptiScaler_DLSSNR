@@ -21,7 +21,9 @@ enum DlssNrMode : uint32_t
     DlssNrMode_Downsample = 2, // the proxy -> a smaller proxy, when the model works below full size
     DlssNrMode_Meter = 3,      // the exposure texture -> tile (0,0), for the white point
     DlssNrMode_Calibrate = 4,  // the untouched frame -> a grid of tile peak luminances
-    DlssNrMode_Accumulate = 5  // the de-jittered proxy + last frame's accumulation -> this frame's
+    DlssNrMode_Accumulate = 5, // the de-jittered proxy + last frame's accumulation -> this frame's
+    DlssNrMode_Probe = 6       // three mean luminances -- what the model was shown, what it returned,
+                               // and the untouched frame -- into the first three texels of the meter
 };
 
 // The meter's grid. 64 x 64 tiles over the whole frame, whatever its size.

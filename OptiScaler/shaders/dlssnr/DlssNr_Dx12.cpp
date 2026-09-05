@@ -358,6 +358,13 @@ struct NrState
     ID3D12Resource* meter = nullptr;
     ID3D12Resource* meterReadback[4] = {};
 
+    // The probe's three means, and which readback slots carry them.
+    bool meterProbeValid[4] = {};
+    float probeProxy = -1.0f;
+    float probeModel = -1.0f;
+    float probeFrame = -1.0f;
+    unsigned long long probeLoggedAt = 0;
+
     // The calibration grid: what scale the game's buffer is on, measured from the untouched copy.
     // Its own surface and ring rather than sharing the meter's, because the two run at different
     // sizes -- the meter fetches one texel and this reads the whole frame.
@@ -975,7 +982,7 @@ void CopyCalibrationToReadback(ID3D12GraphicsCommandList* cmdList)
 }
 
 void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device,
-                         bool exposureBound)
+                         bool exposureBound, bool probeBound = false)
 {
     const unsigned int slot = (unsigned int) (g_nr.meterFrames % 4);
 
@@ -984,6 +991,7 @@ void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devic
 
     // Travels with the grid: read back three frames from now, alongside the tiles it describes.
     g_nr.meterExposureValid[slot] = exposureBound;
+    g_nr.meterProbeValid[slot] = probeBound;
 
     D3D12_TEXTURE_COPY_LOCATION src {};
     src.pResource = g_nr.meter;
@@ -1127,12 +1135,24 @@ void ConsumeMeterReadback()
         return;
 
     void* mapped = nullptr;
-    D3D12_RANGE range { 0, sizeof(float) };
+    D3D12_RANGE range { 0, 3 * sizeof(float) };
 
     if (FAILED(buffer->Map(0, &range, &mapped)) || mapped == nullptr)
         return;
 
     const float* src = (const float*) mapped;
+
+    // A probe grid carries three means in its first three texels and no exposure at all, so the two
+    // readers are told apart by which flag the writing frame set rather than by inspecting the values.
+    if (g_nr.meterProbeValid[slot])
+    {
+        if (std::isfinite(src[0]) && std::isfinite(src[1]) && std::isfinite(src[2]))
+        {
+            g_nr.probeProxy = src[0];
+            g_nr.probeModel = src[1];
+            g_nr.probeFrame = src[2];
+        }
+    }
 
     // Only believed when the frame that wrote this grid actually had an exposure texture bound. With
     // nothing bound DispatchPass substitutes the source picture, and tile 0 is then a scene pixel
@@ -3763,6 +3783,46 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
                             exposureTex, target, nullptr);
         composed = true;
+
+        // Measure what the model was actually handed and what it handed back.
+        //
+        // Placed here because every resource the resolve needed is still bound and readable; one more
+        // dispatch of three threads costs nothing next to the model. It exists because four rounds of
+        // composition work have been reported as "no difference at all" and nothing in this pass could
+        // say whether the composition was at fault, the proxy was black, or the model simply returned
+        // its input. Those three look identical from outside and are three different bugs.
+        if (g_nr.meter != nullptr && cfg.DlssNrProbeSignal.value_or_default())
+        {
+            DlssNrConstants probeParams {};
+            probeParams.Mode = DlssNrMode_Probe;
+            probeParams.Width = 3;
+            probeParams.Height = 1;
+
+            DispatchPass(cmdList, probeParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, nullptr,
+                         nullptr, g_nr.meter, nullptr);
+
+            CopyMeterToReadback(cmdList, device, false, true);
+            ConsumeMeterReadback();
+
+            // Once every two seconds or so, not every frame. The numbers move with the scene and the
+            // point is their magnitudes and their ratio, not their history.
+            if (g_frames - g_nr.probeLoggedAt >= 120 && g_nr.probeProxy >= 0.0f)
+            {
+                g_nr.probeLoggedAt = g_frames;
+
+                const float ratio = g_nr.probeProxy > 1e-9f ? g_nr.probeModel / g_nr.probeProxy : -1.0f;
+
+                LOG_INFO("DLSS-NR signal: frame {:.6f} -> proxy {:.6f} -> model {:.6f} "
+                         "(model/proxy {:.4f}, white point {:.3f}, {})",
+                         g_nr.probeFrame, g_nr.probeProxy, g_nr.probeModel, ratio,
+                         resolveParams.WhitePoint,
+                         g_nr.probeProxy < 0.005f
+                             ? "PROXY IS BLACK -- the model is being shown nothing"
+                         : (ratio > 0.0f && ratio > 0.995f && ratio < 1.005f)
+                             ? "the model returned its input -- there is no edit to compose"
+                             : "the model changed the picture");
+            }
+        }
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 

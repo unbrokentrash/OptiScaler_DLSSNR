@@ -305,6 +305,15 @@ class Config
     // goes in a real title.
     CustomOptional<uint32_t> DlssNrDejitter { 0 };
 
+    // Measure the mean luminance of the picture the model was shown, the one it returned, and the
+    // untouched frame, and write the three to the log a couple of times a second.
+    //
+    // On by default, and it costs one dispatch of three threads. Four rounds of composition work were
+    // reported as "no difference at all" while nothing in this pass could say whether the composition
+    // was at fault, the proxy had come out black, or the model had simply returned its input. Those
+    // three are indistinguishable from outside and are three different bugs.
+    CustomOptional<bool> DlssNrProbeSignal { true };
+
     // How the model's answer becomes the frame handed to the upscaler, when the pass runs before it.
     //
     //   0  The model's picture. What this always did: the model's answer is returned as a complete
