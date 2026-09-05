@@ -3598,22 +3598,24 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // which is why this is a mode rather than a flag. At zero the edit lands where the model
         // computed it, half a pixel or so off the frame underneath -- worth seeing, since the shading
         // the model adds is broad and may not care.
-        // Hand the upscaler the frame plus the model's edit, instead of the model's picture.
+        // How the model's answer becomes the frame handed to the upscaler.
         //
-        // Forced before the upscale, where what this pass writes is an upscaler INPUT. Without it the
-        // composition returns the model's answer as a complete picture -- the frame contributing only
-        // its luminance -- so the upscaler accumulates the model's reconstruction of a tone-curved,
-        // [0,1]-bounded, sRGB-round-tripped proxy instead of the game's own frame. That is the
-        // difference between the two placements that was always blamed on resolution.
+        // Before the upscale only. After it, this pass writes the finished frame and reconstructing it
+        // from the model's picture is a fair trade -- nothing follows to compound the proxy round trip
+        // -- so that placement stays on 0 and byte-identical to what it always was.
         //
-        // Also whenever something replaced the model's input at full size. Neither the accumulation
-        // nor the prepass changes a dimension, so nothing downstream can detect them from the
-        // resources; without being told, their reconstruction lands in the player's frame too.
-        resolveParams.CarryEdit =
-            ((!inPlace && cfg.DlssNrCarryEdit.value_or_default()) || cleanHeld != nullptr ||
-             accumHeld != nullptr)
-                ? 1u
-                : 0u;
+        // A substituted input needs at least mode 1 whatever the setting reads: the accumulation and
+        // the prepass change no dimension, so nothing downstream can detect them, and without the
+        // proxy being rebuilt their reconstruction lands in the player's frame along with the model's.
+        unsigned int composeMode = inPlace ? 0u : cfg.DlssNrCompose.value_or_default();
+
+        if (composeMode > 2u)
+            composeMode = 2u;
+
+        if (composeMode < 1u && (cleanHeld != nullptr || accumHeld != nullptr))
+            composeMode = 1u;
+
+        resolveParams.ComposeMode = composeMode;
 
         resolveParams.DejitterMode = cleanHeld != nullptr
                                          ? cfg.DlssNrPrepassRejitter.value_or_default()

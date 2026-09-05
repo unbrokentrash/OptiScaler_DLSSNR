@@ -305,23 +305,22 @@ class Config
     // goes in a real title.
     CustomOptional<uint32_t> DlssNrDejitter { 0 };
 
-    // What the upscaler is handed when the pass runs before it: the frame plus the model's edit, or
-    // the model's picture.
+    // How the model's answer becomes the frame handed to the upscaler, when the pass runs before it.
     //
-    // The composition does not add an edit onto the frame by default. It returns the model's answer as
-    // a complete picture with its luminance re-anchored per pixel -- so at the shipped strengths the
-    // output IS the model's picture, and the frame contributes its luminance and nothing else.
+    //   0  The model's picture. What this always did: the model's answer is returned as a complete
+    //      picture with its luminance re-anchored to the frame. The frame reaches the output through
+    //      one scalar ratio and nothing else -- so its detail, its precision and every highlight the
+    //      proxy's curve could not hold are replaced by a reconstruction out of proxy space, and the
+    //      upscaler downstream then accumulates that.
+    //   1  Rebuild the frame's own proxy first, then carry the model's difference onto it. Real when
+    //      the model's input was reduced or substituted; the IDENTITY when it was neither.
+    //   2  The frame times what the model changed: original * (model / proxy). Both sides are in
+    //      proxy space so it cancels, leaving what the model DID, applied to the frame the player has
+    //      -- at the frame's own precision and bit-exact where the model changed nothing.
     //
-    // After the upscale that is a defensible way to compose a finished frame. Before it, the game's
-    // upscaler is then handed the model's reconstruction of a proxy -- tone-curved into [0,1], round
-    // tripped through an sRGB surface, un-curved by a luminance rescale rather than by inverting the
-    // curve -- and accumulates it temporally. That is the placement difference that was blamed on
-    // resolution for a long time, and it is not the model's doing.
-    //
-    // On, the resolve rebuilds the frame's own proxy and carries only the model's difference onto it,
-    // so the upscaler receives the game's own frame with the model's edit on it. Off is the old
-    // behaviour, kept because it is the only way to see what this was.
-    CustomOptional<bool> DlssNrCarryEdit { true };
+    // Defaults to 2, because the placement's whole problem is that it hands an upscaler a
+    // reconstruction. Meaningless after the upscale, which always uses 0.
+    CustomOptional<uint32_t> DlssNrCompose { 2 };
 
     // Run a second DLSS, at a 1:1 ratio, over the model's input before the model sees it.
     //

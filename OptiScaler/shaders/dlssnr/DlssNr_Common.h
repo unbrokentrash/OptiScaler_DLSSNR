@@ -229,22 +229,22 @@ struct alignas(256) DlssNrConstants
     float AccumAlpha;
     uint32_t AccumMv;
 
-    // Hand back the frame plus the model's edit, rather than the model's picture.
+    // How the model's answer becomes the frame this pass writes. Before the upscale only; the
+    // after-upscale placement always uses 0 and is byte-identical to what it always was.
     //
-    // The composition does not add an edit onto the frame by default -- it returns the model's answer
-    // as a complete picture with its luminance re-anchored. At the shipped strengths the output IS the
-    // model's picture; the frame contributes its luminance and nothing else.
+    //   0  the model's picture, luminance-anchored to the frame. What this always did.
+    //   1  rebuild the frame's own proxy first and carry the model's difference onto it. Needed when
+    //      the model's input was reduced or substituted; the IDENTITY when it was neither, because
+    //      fullProxy + (model - proxy) is model when proxy is already the frame's own proxy.
+    //   2  the frame times what the model changed: original * (model / proxy). Both sides of that
+    //      division are in proxy space so the space cancels, leaving a dimensionless "what the model
+    //      did" applied to the frame the player actually has -- at the frame's own precision, with
+    //      its highlights intact, and bit-exact where the model changed nothing.
     //
-    // Before the upscale that means the game's upscaler is handed the model's reconstruction of a
-    // proxy instead of the game's own frame, and accumulates it. With this set the resolve rebuilds
-    // the frame's own proxy and carries only the model's difference onto it, so the frame keeps its
-    // own picture and the model contributes exactly what it changed.
-    //
-    // It also makes anything that replaced the model's INPUT cancel -- the frame-averaging
-    // accumulation, the DLSS prepass -- since the substitution is then present on both sides of the
-    // difference. Those are invisible to the resolve otherwise: a substitute is the same size and
-    // format as the picture it stands in for, so only the host knows.
-    uint32_t CarryEdit;
+    // Modes 0 and 1 reconstruct the output from proxy space, so the frame's detail and precision are
+    // replaced by that reconstruction and then accumulated by the upscaler downstream. That is the
+    // placement difference that was blamed on the model's resolution.
+    uint32_t ComposeMode;
 };
 
 class DlssNr_Common

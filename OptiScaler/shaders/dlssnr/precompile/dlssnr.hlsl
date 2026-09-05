@@ -36,7 +36,7 @@ cbuffer Params : register(b0)
     float gCompChroma;
     float gAccumAlpha;     // how much of the current frame enters the accumulated input, 0..1
     uint  gAccumMv;        // reprojection sign: 1 subtract the vector, 2 add it
-    uint  gCarryEdit;      // 1 = hand back the frame plus the model's edit, not the model's picture
+    uint  gComposeMode;    // 0 the model's picture, 1 rebuild the proxy first, 2 the frame x the model's change
 };
 
 // How much the edit is boosted before an upscaler gets to eat some of it.
@@ -565,7 +565,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // Only the model's input is built this way, and the frame the upscaler receives keeps its own
     // picture -- but only because the resolve is told the input was substituted and carries the
     // model's DIFFERENCE onto the frame's own proxy rather than handing back the model's picture
-    // whole. Without that flag this average landed in the player's frame. See gCarryEdit.
+    // whole. Without that flag this average landed in the player's frame. See gComposeMode.
     //
     //   gSource   the de-jittered proxy for this frame
     //   gModel    the accumulation as it stood last frame
@@ -1005,11 +1005,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // never noticed them, and their reconstruction went into the player's frame along with the
     // model's answer. A pass meant to clean the model's input was replacing the picture instead.
     //
-    // gCarryEdit says: rebuild this frame's own proxy here and carry only the model's DIFFERENCE onto
+    // gComposeMode says: rebuild this frame's own proxy here and carry only the model's DIFFERENCE onto
     // it. Then the frame keeps its own picture, the model contributes exactly what it changed, and
     // anything done to the model's input cancels -- it is present both in the model's answer and in
     // the picture that answer is measured against.
-    if ((gTransfer == 1 && modelRanSmall) || gCarryEdit != 0)
+    if ((gTransfer == 1 && modelRanSmall) || gComposeMode != 0)
     {
         // Saturated, because that is what the encode does and this has to reproduce it exactly.
         //
@@ -1156,6 +1156,57 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     if (gColourStrength > 1.0)
         result = ClampAp1(FromOkLab(float3(1.0, gColourStrength, gColourStrength) * ToOkLab(max(result, 0.0))));
+
+    // Mode 2: the frame times what the model changed, instead of the model's picture.
+    //
+    // Everything above reconstructs the output from `model`, which lives in proxy space -- tone
+    // curved into [0,1], written to an sRGB surface and read back. `original` reaches the result only
+    // through one scalar luminance ratio. So the frame's own detail, its precision and every highlight
+    // the proxy's curve could not represent are replaced by that reconstruction, on every pixel.
+    //
+    // Finished frame, that is a fair trade: the model's picture is the better picture and nothing
+    // follows it. Before the upscale it is not, because what follows is a temporal upscaler that
+    // accumulates whatever it is given. The round trip is then compounded frame after frame, and that
+    // -- not the model's resolution -- is the difference between the two placements.
+    //
+    // Rebuilding the proxy (mode 1) does not fix it and cannot: fullProxy + (model - proxy) IS model
+    // whenever proxy already is the frame's own proxy, which this file says twenty lines up. Mode 1
+    // earns its place only when the proxy was reduced or substituted; at full size with a plain input
+    // it is the identity, and shipping it as a fix for this was wrong.
+    //
+    // What does fix it is expressing the model's answer as a CHANGE rather than as a picture, and
+    // applying that change to the frame the player actually has:
+    //
+    //     result = original * (model / proxy)
+    //
+    // Both sides of that division are in proxy space, so the space cancels and the ratio is
+    // dimensionless -- it is "what the model did", nothing more. Where the model changed nothing the
+    // ratio is one and the frame passes through untouched, which is a guarantee no reconstruction can
+    // make. Where it changed something the frame is scaled by exactly that much, at the frame's own
+    // precision, with its highlights intact.
+    //
+    // Split into luminance and chroma so the two strengths keep meaning what they say: detail is an
+    // exponent on the luminance ratio (one to any power is one, so an untouched pixel stays
+    // untouched), colour scales the per-channel ratio with its luminance part divided out. Both are
+    // bounded by the same guard as everything else here.
+    if (gComposeMode == 2)
+    {
+        const float pL = max(dot(proxy, kLuma), 0.0);
+        const float mL = max(dot(model, kLuma), 0.0);
+
+        const float lumaRaw = (mL + kRatioFloor) / (pL + kRatioFloor);
+        const float lumaGain =
+            clamp(pow(max(lumaRaw, 1e-6), max(gTransferStrength, 0.0)), 1.0 / guard, guard);
+
+        // The per-channel ratio with its luminance component removed, so colour strength moves hue
+        // and saturation without moving brightness a second time.
+        const float3 chanGain = (max(model, 0.0) + kRatioFloor) / (max(proxy, 0.0) + kRatioFloor);
+        const float3 chromaGain =
+            clamp(lerp(float3(1.0, 1.0, 1.0), chanGain / max(lumaRaw, 1e-6), saturate(gColourStrength)),
+                  1.0 / guard, guard);
+
+        result = max(original, 0.0) * lumaGain * chromaGain;
+    }
 
     // Put back some of what the upscaler downstream is going to take. Identity at the after-upscale
     // placement, and identity at its default, which is off.

@@ -128,39 +128,48 @@ void RenderMenu(Config* config, float menuResScale)
             const bool before = config->DlssNrBeforeUpscale.value_or_default();
             ImGui::BeginDisabled(!before);
 
-            static const char* carryNames[] = { "The model's picture (old)", "The frame + the model's edit" };
-            int carry = config->DlssNrCarryEdit.value_or_default() ? 1 : 0;
+            static const char* carryNames[] = { "The model's picture (old)", "Rebuilt proxy + the edit",
+                                                "The frame x the model's change" };
+            int carry = (int) config->DlssNrCompose.value_or_default();
+
+            if (carry < 0 || carry >= IM_ARRAYSIZE(carryNames))
+                carry = 2;
 
             ImGui::PushItemWidth(260.0f * menuResScale);
 
             if (ImGui::Combo("The upscaler receives", &carry, carryNames, IM_ARRAYSIZE(carryNames)))
-                config->DlssNrCarryEdit = carry != 0;
+                config->DlssNrCompose = (uint32_t) carry;
 
             ImGui::PopItemWidth();
             ImGui::EndDisabled();
         }
 
-        HelpMarker("What this pass actually hands to the game's upscaler. Read this one before the"
-                       "\nothers -- it explains more of the placement difference than resolution does."
+        HelpMarker("What this pass actually hands to the game's upscaler. Read this one first -- it"
+                       "\nexplains more of the placement difference than resolution ever did."
                        "\n\nThe composition does NOT add an edit onto the frame by default. It returns"
-                       "\nthe model's answer as a complete picture with its luminance re-anchored per"
-                       "\npixel. At the shipped strengths the output IS the model's picture; the frame"
-                       "\ncontributes its luminance and nothing else -- not its detail, not its"
-                       "\nprecision, not the values the proxy's curve could not represent."
-                       "\n\nAfter the upscale that is a reasonable way to compose a finished frame."
-                       "\nBEFORE it, the upscaler is handed the model's reconstruction of a proxy --"
-                       "\ntone-curved into 0..1, round-tripped through an sRGB surface, un-curved by a"
-                       "\nluminance rescale rather than by inverting the curve -- and then accumulates"
-                       "\nit temporally. That is the placement difference that was blamed on"
-                       "\nresolution for a long time, and it was never the model's doing."
-                       "\n\n\"The frame + the model's edit\" rebuilds the frame's own proxy in the"
-                       "\nresolve and carries only the model's DIFFERENCE onto it. The upscaler then"
-                       "\nreceives the game's own frame with the model's edit on it, at the game's own"
-                       "\nprecision. It also makes the input-cleaning options below cancel properly:"
-                       "\nthey are then present on both sides of that difference."
-                       "\n\n\"The model's picture (old)\" is what this did before. Kept because it is"
-                       "\nthe only way to see what was happening, and because the two are a real A/B."
-                       "\n\nMeaningless after the upscale, where there is no upscaler downstream.");
+                       "\nthe model's answer as a complete picture with its luminance re-anchored, so"
+                       "\nthe frame reaches the output through ONE SCALAR and nothing else. Its detail,"
+                       "\nits precision and every highlight the proxy's curve could not hold are"
+                       "\nreplaced by a reconstruction out of proxy space -- tone-curved into 0..1,"
+                       "\nround-tripped through an sRGB surface, un-curved by a luminance rescale"
+                       "\nrather than by inverting the curve."
+                       "\n\nAs a finished frame that is a fair trade. Before the upscale it is not,"
+                       "\nbecause a temporal upscaler follows and accumulates whatever it is given, so"
+                       "\nthe round trip compounds frame after frame."
+                       "\n\n\"The frame x the model's change\" expresses the answer as a ratio instead"
+                       "\nof a picture: original * (model / proxy). Both sides of that division are in"
+                       "\nproxy space, so the space cancels and what is left is what the MODEL DID,"
+                       "\napplied to the frame the player actually has. Where the model changed"
+                       "\nnothing the ratio is one and the frame passes through untouched -- a"
+                       "\nguarantee no reconstruction can make. Detail strength is an exponent on the"
+                       "\nluminance ratio; colour strength scales the per-channel ratio with its"
+                       "\nluminance part divided out."
+                       "\n\n\"Rebuilt proxy + the edit\" is honest but narrow: it only differs when the"
+                       "\nmodel's input was reduced or substituted. At full size with a plain input it"
+                       "\nis the IDENTITY -- fullProxy + (model - proxy) is model -- so it is not a fix"
+                       "\nfor the placement on its own, and it was shipped once as though it were."
+                       "\n\n\"The model's picture (old)\" is what this always did, kept as the A/B."
+                       "\n\nMeaningless after the upscale, which always uses the old path.");
 
         // Only meaningful on the pre-upscale side, and dimmed rather than hidden on the other so the
         // reason it does nothing there is visible.
