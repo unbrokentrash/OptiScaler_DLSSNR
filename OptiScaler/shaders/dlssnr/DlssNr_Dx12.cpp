@@ -364,6 +364,7 @@ struct NrState
     float probeModel = -1.0f;
     float probeFrame = -1.0f;
     float probeEdit = -1.0f;
+    float probeOut = -1.0f;
     unsigned long long probeLoggedAt = 0;
 
     // The calibration grid: what scale the game's buffer is on, measured from the untouched copy.
@@ -1136,7 +1137,7 @@ void ConsumeMeterReadback()
         return;
 
     void* mapped = nullptr;
-    D3D12_RANGE range { 0, 4 * sizeof(float) };
+    D3D12_RANGE range { 0, 5 * sizeof(float) };
 
     if (FAILED(buffer->Map(0, &range, &mapped)) || mapped == nullptr)
         return;
@@ -1148,12 +1149,13 @@ void ConsumeMeterReadback()
     if (g_nr.meterProbeValid[slot])
     {
         if (std::isfinite(src[0]) && std::isfinite(src[1]) && std::isfinite(src[2]) &&
-            std::isfinite(src[3]))
+            std::isfinite(src[3]) && std::isfinite(src[4]))
         {
             g_nr.probeProxy = src[0];
             g_nr.probeModel = src[1];
             g_nr.probeFrame = src[2];
             g_nr.probeEdit = src[3];
+            g_nr.probeOut = src[4];
         }
     }
 
@@ -3798,11 +3800,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         {
             DlssNrConstants probeParams {};
             probeParams.Mode = DlssNrMode_Probe;
-            probeParams.Width = 4;
+            probeParams.Width = 5;
             probeParams.Height = 1;
 
+            // target carries the composed frame and goes in through the exposure slot, which the
+            // probe has no other use for. It is a UAV the resolve has just written; reading it as an
+            // SRV in the same command list is exactly what the resolve already does with its own
+            // inputs, and nothing else touches it between the two dispatches.
             DispatchPass(cmdList, probeParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, nullptr,
-                         nullptr, g_nr.meter, nullptr);
+                         target, g_nr.meter, nullptr);
 
             CopyMeterToReadback(cmdList, device, false, true);
             ConsumeMeterReadback();
@@ -3822,17 +3828,26 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 const float editRel =
                     g_nr.probeProxy > 1e-9f ? g_nr.probeEdit / g_nr.probeProxy : -1.0f;
 
-                LOG_INFO("DLSS-NR signal: frame {:.6f} -> proxy {:.6f} -> model {:.6f} | edit "
-                         "{:.6f} ({:.2f}% of the picture), mean shift {:.4f}x, white point {:.3f}, "
-                         "model {}x{} on a {}x{} frame -- {}",
-                         g_nr.probeFrame, g_nr.probeProxy, g_nr.probeModel, g_nr.probeEdit,
-                         editRel * 100.0f, ratio, resolveParams.WhitePoint, workWidth, workHeight,
-                         width, height,
+                // And how much of that survived into the frame this pass writes. Measured against the
+                // untouched frame, in the frame's own scale, so it is directly comparable with the
+                // edit above rather than with anything in proxy space.
+                const float outRel = g_nr.probeFrame > 1e-9f ? g_nr.probeOut / g_nr.probeFrame : -1.0f;
+
+                LOG_INFO("DLSS-NR signal: proxy {:.4f} model {:.4f} | model rewrote {:.2f}% of its "
+                         "input | composed frame differs from the game's by {:.2f}% | mean shift "
+                         "{:.4f}x, white point {:.3f}, model {}x{} on a {}x{} frame -- {}",
+                         g_nr.probeProxy, g_nr.probeModel, editRel * 100.0f, outRel * 100.0f, ratio,
+                         resolveParams.WhitePoint, workWidth, workHeight, width, height,
                          g_nr.probeProxy < 0.005f
                              ? "PROXY IS BLACK -- the model is being shown nothing"
                          : editRel < 0.002f
-                             ? "THE MODEL IS DOING ALMOST NOTHING -- there is no edit to compose"
-                             : "the model rewrote the picture");
+                             ? "THE MODEL IS DOING ALMOST NOTHING"
+                         : outRel < 0.002f
+                             ? "THE COMPOSITION IS EATING THE EDIT -- the model worked, the frame did "
+                               "not change"
+                         : outRel < editRel * 0.25f
+                             ? "most of the model's work is being lost in the composition"
+                             : "the model's work is reaching the frame");
             }
         }
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,

@@ -636,6 +636,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     //   x = 1  mean luminance of the picture it returned
     //   x = 2  mean luminance of the untouched frame
     //   x = 3  mean ABSOLUTE luminance difference between the first two
+    //   x = 4  mean ABSOLUTE luminance difference between the COMPOSED FRAME and the untouched one,
+    //          read through the exposure slot, which the probe has no other use for
     //
     // The fourth is the one that matters and the first version of this did not have it. A ratio of
     // means cannot see what this model mostly does: it adds and removes local structure, and those
@@ -670,11 +672,24 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 {
                     sum += dot(max(gOriginal.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
                 }
-                else
+                else if (id.x == 3u)
                 {
                     const float p = dot(max(gSource.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
                     const float m = dot(max(gModel.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
                     sum += abs(m - p);
+                }
+                else
+                {
+                    // The last link in the chain, and the one nobody has ever measured: how much of
+                    // the model's work is still there in the frame this pass actually writes.
+                    //
+                    // The model rewriting 7% of the proxy tells us nothing on its own if the
+                    // composition then hands back something 0.5% away from the frame it started with.
+                    // Those two numbers side by side say which stage the work is being lost at --
+                    // and until now the chain simply stopped one step short of the answer.
+                    const float o = dot(max(gOriginal.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
+                    const float c = dot(max(gExposure.SampleLevel(gLinear, st, 0).rgb, 0.0), kLuma);
+                    sum += abs(c - o);
                 }
             }
         }
