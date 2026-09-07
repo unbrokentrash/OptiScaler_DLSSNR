@@ -358,8 +358,17 @@ struct NrState
     ID3D12Resource* meter = nullptr;
     ID3D12Resource* meterReadback[4] = {};
 
-    // The probe's three means, and which readback slots carry them.
-    bool meterProbeValid[4] = {};
+    // The probe's own grid and its own readback ring.
+    //
+    // It had neither, and shared the exposure meter's. That broke an invariant this file states
+    // twenty lines above InvalidateExposureMeter: meterFrames advances only inside the exposure
+    // block, which is what makes the four slots four FRAMES deep. With the probe advancing it too,
+    // a slot written this frame was mapped one or two frames later instead of four -- a readback
+    // with no fence, read before the GPU had finished writing it. The exposure that came back was
+    // whatever was in the buffer, the white point followed it, and the picture flickered.
+    ID3D12Resource* probeGrid = nullptr;
+    ID3D12Resource* probeReadback[4] = {};
+    unsigned long long probeFrames = 0;
     float probeProxy = -1.0f;
     float probeModel = -1.0f;
     float probeFrame = -1.0f;
@@ -984,7 +993,7 @@ void CopyCalibrationToReadback(ID3D12GraphicsCommandList* cmdList)
 }
 
 void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device,
-                         bool exposureBound, bool probeBound = false)
+                         bool exposureBound)
 {
     const unsigned int slot = (unsigned int) (g_nr.meterFrames % 4);
 
@@ -993,7 +1002,6 @@ void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devic
 
     // Travels with the grid: read back three frames from now, alongside the tiles it describes.
     g_nr.meterExposureValid[slot] = exposureBound;
-    g_nr.meterProbeValid[slot] = probeBound;
 
     D3D12_TEXTURE_COPY_LOCATION src {};
     src.pResource = g_nr.meter;
@@ -1125,13 +1133,85 @@ void ConsumeCalibrationReadback()
     }
 }
 
-void ConsumeMeterReadback()
+ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width,
+                              unsigned int height, bool renderTarget = false);
+
+// The probe's ring, kept entirely separate from the meter's so neither can shorten the other's
+// latency. Same four-deep shape, same reasoning: a readback with no fence needs the frames.
+bool EnsureProbeRing(ID3D12Device* device)
 {
-    if (g_nr.meterFrames < 4)
+    if (g_nr.probeGrid != nullptr)
+        return true;
+
+    g_nr.probeGrid = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, kDlssNrMeterGrid, kDlssNrMeterGrid);
+
+    if (g_nr.probeGrid == nullptr)
+        return false;
+
+    D3D12_HEAP_PROPERTIES readback {};
+    readback.Type = D3D12_HEAP_TYPE_READBACK;
+
+    D3D12_RESOURCE_DESC bufferDesc {};
+    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bufferDesc.Width = kMeterBytes;
+    bufferDesc.Height = 1;
+    bufferDesc.DepthOrArraySize = 1;
+    bufferDesc.MipLevels = 1;
+    bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+    bufferDesc.SampleDesc.Count = 1;
+    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    for (auto& rb : g_nr.probeReadback)
+    {
+        if (FAILED(device->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(&rb))))
+        {
+            rb = nullptr;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void CopyProbeToReadback(ID3D12GraphicsCommandList* cmdList)
+{
+    const unsigned int slot = (unsigned int) (g_nr.probeFrames % 4);
+
+    if (g_nr.probeReadback[slot] == nullptr || g_nr.probeGrid == nullptr)
         return;
 
-    const unsigned int slot = (unsigned int) (g_nr.meterFrames % 4);
-    ID3D12Resource* buffer = g_nr.meterReadback[slot];
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = g_nr.probeGrid;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = g_nr.probeReadback[slot];
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Offset = 0;
+    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_FLOAT;
+    dst.PlacedFootprint.Footprint.Width = kDlssNrMeterGrid;
+    dst.PlacedFootprint.Footprint.Height = kDlssNrMeterGrid;
+    dst.PlacedFootprint.Footprint.Depth = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = kMeterRowBytes;
+
+    Barrier(cmdList, g_nr.probeGrid, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    Barrier(cmdList, g_nr.probeGrid, D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+    g_nr.probeFrames++;
+}
+
+void ConsumeProbeReadback()
+{
+    if (g_nr.probeFrames < 4)
+        return;
+
+    ID3D12Resource* buffer = g_nr.probeReadback[(unsigned int) (g_nr.probeFrames % 4)];
 
     if (buffer == nullptr)
         return;
@@ -1144,20 +1224,39 @@ void ConsumeMeterReadback()
 
     const float* src = (const float*) mapped;
 
-    // A probe grid carries three means in its first three texels and no exposure at all, so the two
-    // readers are told apart by which flag the writing frame set rather than by inspecting the values.
-    if (g_nr.meterProbeValid[slot])
+    if (std::isfinite(src[0]) && std::isfinite(src[1]) && std::isfinite(src[2]) &&
+        std::isfinite(src[3]) && std::isfinite(src[4]))
     {
-        if (std::isfinite(src[0]) && std::isfinite(src[1]) && std::isfinite(src[2]) &&
-            std::isfinite(src[3]) && std::isfinite(src[4]))
-        {
-            g_nr.probeProxy = src[0];
-            g_nr.probeModel = src[1];
-            g_nr.probeFrame = src[2];
-            g_nr.probeEdit = src[3];
-            g_nr.probeOut = src[4];
-        }
+        g_nr.probeProxy = src[0];
+        g_nr.probeModel = src[1];
+        g_nr.probeFrame = src[2];
+        g_nr.probeEdit = src[3];
+        g_nr.probeOut = src[4];
     }
+
+    D3D12_RANGE nothingWritten { 0, 0 };
+    buffer->Unmap(0, &nothingWritten);
+}
+
+void ConsumeMeterReadback()
+{
+    if (g_nr.meterFrames < 4)
+        return;
+
+    const unsigned int slot = (unsigned int) (g_nr.meterFrames % 4);
+    ID3D12Resource* buffer = g_nr.meterReadback[slot];
+
+    if (buffer == nullptr)
+        return;
+
+    void* mapped = nullptr;
+    D3D12_RANGE range { 0, sizeof(float) };
+
+    if (FAILED(buffer->Map(0, &range, &mapped)) || mapped == nullptr)
+        return;
+
+    const float* src = (const float*) mapped;
+
 
     // Only believed when the frame that wrote this grid actually had an exposure texture bound. With
     // nothing bound DispatchPass substitutes the source picture, and tile 0 is then a scene pixel
@@ -3824,7 +3923,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // composition work have been reported as "no difference at all" and nothing in this pass could
         // say whether the composition was at fault, the proxy was black, or the model simply returned
         // its input. Those three look identical from outside and are three different bugs.
-        if (g_nr.meter != nullptr && cfg.DlssNrProbeSignal.value_or_default())
+        if (cfg.DlssNrProbeSignal.value_or_default() && EnsureProbeRing(device))
         {
             DlssNrConstants probeParams {};
             probeParams.Mode = DlssNrMode_Probe;
@@ -3845,14 +3944,14 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
             DispatchPass(cmdList, probeParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, nullptr,
-                         target, g_nr.meter, nullptr);
+                         target, g_nr.probeGrid, nullptr);
 
             // Back where the exit barriers expect to find it.
             Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-            CopyMeterToReadback(cmdList, device, false, true);
-            ConsumeMeterReadback();
+            CopyProbeToReadback(cmdList);
+            ConsumeProbeReadback();
 
             // Once every two seconds or so, not every frame. The numbers move with the scene and the
             // point is their magnitudes and their ratio, not their history.
@@ -4704,6 +4803,23 @@ void Shutdown()
             rb = nullptr;
         }
     }
+
+    if (g_nr.probeGrid != nullptr)
+    {
+        g_nr.probeGrid->Release();
+        g_nr.probeGrid = nullptr;
+    }
+
+    for (auto& rb : g_nr.probeReadback)
+    {
+        if (rb != nullptr)
+        {
+            rb->Release();
+            rb = nullptr;
+        }
+    }
+
+    g_nr.probeFrames = 0;
 
     // The slots these flags describe have just been released, so nothing may vouch for what the next
     // buffers happen to contain. gameExposure is deliberately NOT cleared here: a recreate is a

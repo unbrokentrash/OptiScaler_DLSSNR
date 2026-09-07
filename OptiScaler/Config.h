@@ -327,11 +327,17 @@ class Config
     // Measure the mean luminance of the picture the model was shown, the one it returned, and the
     // untouched frame, and write the three to the log a couple of times a second.
     //
-    // On by default, and it costs one dispatch of three threads. Four rounds of composition work were
-    // reported as "no difference at all" while nothing in this pass could say whether the composition
-    // was at fault, the proxy had come out black, or the model had simply returned its input. Those
-    // three are indistinguishable from outside and are three different bugs.
-    CustomOptional<bool> DlssNrProbeSignal { true };
+    // OFF by default now, and it was on. It shipped sharing the exposure meter's readback ring, which
+    // broke an invariant that ring depends on -- its counter advances only inside the exposure block,
+    // which is what makes four slots mean four FRAMES. With this advancing it too, a slot written
+    // this frame was mapped one or two frames later instead of four: a readback with no fence, read
+    // before the GPU had finished writing it. The exposure came back as whatever was in the buffer,
+    // the white point followed it, and the picture flickered in both placements.
+    //
+    // It has its own grid and its own ring now, so it is safe to switch on. It is off because a
+    // diagnostic that has already cost a stable picture once does not get to be on by default, and
+    // because it has served its purpose: the chain from frame to composed output is measured.
+    CustomOptional<bool> DlssNrProbeSignal { false };
 
     // How the model's answer becomes the frame handed to the upscaler, when the pass runs before it.
     //
