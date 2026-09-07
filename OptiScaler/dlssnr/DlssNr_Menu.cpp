@@ -141,9 +141,33 @@ void RenderMenu(Config* config, float menuResScale)
             if (ImGui::Combo("The upscaler receives", &carry, carryNames, IM_ARRAYSIZE(carryNames)))
                 config->DlssNrCompose = (uint32_t) carry;
 
+            bool writeBack = config->DlssNrWriteBackColour.value_or_default();
+
+            if (ImGui::Checkbox("Write into the game's buffer", &writeBack))
+                config->DlssNrWriteBackColour = writeBack;
+
             ImGui::PopItemWidth();
             ImGui::EndDisabled();
         }
+
+        HelpMarker("HOW the edited frame gets to the upscaler, which is a different question from what"
+                       "\nis in it -- and the one with a silent failure mode."
+                       "\n\nOff, the pass composes into its own texture and repoints the upscaler's"
+                       "\ncolour parameter at it for the length of the evaluate. That is what this fork"
+                       "\nhas always done. If anything downstream read the colour before this hook ran,"
+                       "\ncached the pointer, or reads it under a key this does not patch, it gets the"
+                       "\ngame's untouched frame and reports no error -- which looks exactly like a"
+                       "\npass that composes correctly and changes nothing on screen."
+                       "\n\nOn, the composed frame is copied back into the game's own colour texture and"
+                       "\nthe parameter block is left alone. That cannot be ignored: the pixels are in"
+                       "\nthe resource the upscaler was always going to read. It is what wilsjo2's"
+                       "\npre-SR fork does, and it is the one architectural difference between that"
+                       "\nfork and this one."
+                       "\n\nCosts one render-resolution copy per frame, and MODIFIES THE GAME'S BUFFER:"
+                       "\nanything the game does with that texture after the upscaler reads it will see"
+                       "\nthe edited frame. Off by default for that reason, not because the mechanism"
+                       "\nis worse. If turning this on changes the picture, the parameter swap was"
+                       "\nnever landing.");
 
         HelpMarker("What this pass actually hands to the game's upscaler. Read this one first -- it"
                        "\nexplains more of the placement difference than resolution ever did."

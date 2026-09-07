@@ -2776,6 +2776,15 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (!extraSnippet.has_value())
             extraSnippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
 
+        // One per submitted frame, not all of them at once.
+        //
+        // wilsjo2's fork creates at most one extra feature per submitted frame and keeps the rest
+        // pending, keyed on the wrapped Present count as a submission epoch. This loop used to build
+        // every missing layer on one command list and then return -- which never evaluates on a
+        // creation frame, so it does not reopen the hang directly, but it does ask the driver for
+        // several feature creations back to back with nothing submitted in between. Their rule is
+        // the stricter reading of the same lesson, and a five-pass chain simply takes five frames to
+        // come up rather than one.
         for (unsigned int i = 1; i < wantPasses && i < g_nr.passCeiling && extraSnippet.has_value(); ++i)
         {
             if (g_nr.passFeature[i] != nullptr)
@@ -2791,7 +2800,11 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
                 (int) cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
                 (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
-                cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                // Local tone on the first layer only, which is wilsjo2's rule and the one that makes
+                // sense: local tone is a decision about the picture, and a later layer applying it
+                // again is re-deciding tone on a picture whose tone has already been decided. 1.0 is
+                // the model's own default, so a later layer is told to leave it alone.
+                1.0f, cfg.DlssNrSkinStructure.value_or_default(),
                 cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
 
             builtAny = true;
@@ -2810,6 +2823,9 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 g_nr.passCeiling = i;
                 break;
             }
+
+            // Built one. The rest wait for the next submitted frame.
+            break;
         }
 
         if (builtAny)
@@ -4223,6 +4239,67 @@ bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramet
     // placements; the pass reads one and writes the other and is otherwise the same pass.
     if (!g_compose->Dispatch(cmdList, colour, depth, motion, edit, frame, timingQueue))
         return false;
+
+    // Put the edited frame in the game's own colour texture, rather than handing the upscaler a
+    // different one.
+    //
+    // Two ways to get an edited frame into an upscaler, and this project has only ever used the
+    // second. wilsjo2's pre-SR fork writes the composition into the game's Color resource itself --
+    // directly where it allows unordered access, through a scratch and a copy back where it does not
+    // -- and never touches the parameter block. This fork composes into an owned texture and repoints
+    // NVSDK_NGX_Parameter_Color at it for the length of the evaluate.
+    //
+    // The swap is the weaker of the two, and its failure mode is silent. Anything downstream that
+    // read Color before this hook ran, cached the pointer, or reads it under a key this does not
+    // patch, gets the game's untouched frame and no error -- which looks exactly like a pass that
+    // composes correctly and changes nothing on screen. Copying back cannot be ignored, because the
+    // pixels are in the resource the upscaler was always going to read.
+    //
+    // The copy is the whole cost: one full render-resolution copy a frame. The composition still
+    // happens in the owned texture, so nothing about the pass changes -- in particular `colour` and
+    // `target` stay different resources, which is what keeps this the before-upscale path rather
+    // than tripping the in-place branch.
+    //
+    // Off by default because it MODIFIES THE GAME'S BUFFER. Anything the game does with that texture
+    // after the upscaler reads it sees the edited frame, where the swap left it pristine.
+    if (Config::Instance()->DlssNrWriteBackColour.value_or_default())
+    {
+        const D3D12_RESOURCE_STATES resting = InputColourState();
+
+        Barrier(cmdList, colour, resting, D3D12_RESOURCE_STATE_COPY_DEST);
+        Barrier(cmdList, edit, resting, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        D3D12_TEXTURE_COPY_LOCATION dstLoc {};
+        dstLoc.pResource = colour;
+        dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION srcLoc {};
+        srcLoc.pResource = edit;
+        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        srcLoc.SubresourceIndex = 0;
+
+        // Only the render rect. A dynamic-resolution game keeps one buffer sized for the largest
+        // picture it will ever draw and renders into the corner of it, so copying the whole texture
+        // would write our edit over margins the game owns.
+        const D3D12_BOX box { 0, 0, 0, renderWidth, renderHeight, 1 };
+
+        cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &box);
+
+        Barrier(cmdList, edit, D3D12_RESOURCE_STATE_COPY_SOURCE, resting);
+        Barrier(cmdList, colour, D3D12_RESOURCE_STATE_COPY_DEST, resting);
+
+        static bool saidWriteBack = false;
+
+        if (!saidWriteBack)
+        {
+            saidWriteBack = true;
+            LOG_INFO("DLSS-NR before the upscale: writing the edit back into the game's colour "
+                     "texture ({}x{}), no parameter swap", renderWidth, renderHeight);
+        }
+
+        return true;
+    }
 
     // The upscaler reads its colour out of the parameter block, so the block is where the swap goes.
     g_swappedColourKey = colourKey;

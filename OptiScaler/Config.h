@@ -305,6 +305,25 @@ class Config
     // goes in a real title.
     CustomOptional<uint32_t> DlssNrDejitter { 0 };
 
+    // Put the edited frame in the game's own colour texture instead of handing the upscaler a
+    // different one. Before the upscale only.
+    //
+    // This fork composes into an owned texture and repoints NVSDK_NGX_Parameter_Color at it for the
+    // length of the evaluate. wilsjo2's pre-SR fork never touches the parameter block: it writes the
+    // composition into the game's Color resource itself, through a scratch and a copy back where that
+    // resource allows no unordered access.
+    //
+    // The swap is the weaker of the two and fails silently. Anything downstream that read Color
+    // before this hook ran, cached the pointer, or reads it under a key this does not patch gets the
+    // untouched frame and no error -- indistinguishable from a pass that composes correctly and
+    // changes nothing on screen. A copy back cannot be ignored: the pixels are in the resource the
+    // upscaler was always going to read.
+    //
+    // Costs one render-resolution copy a frame, and MODIFIES THE GAME'S BUFFER -- anything the game
+    // does with that texture after the upscaler reads it sees the edited frame. Off by default for
+    // that reason, not because the mechanism is worse.
+    CustomOptional<bool> DlssNrWriteBackColour { false };
+
     // Measure the mean luminance of the picture the model was shown, the one it returned, and the
     // untouched frame, and write the three to the log a couple of times a second.
     //
@@ -629,7 +648,10 @@ class Config
     // 1 is what the model was trained for and what every published number describes. Above that it
     // is being asked to enhance its own output, which is outside its training distribution: detail
     // compounds, and so does anything it got wrong. Two often looks richer. Four usually looks
-    // synthetic. Ten is there because somebody will want to see it.
+    // synthetic. Ten is there because somebody will want to see it -- and wilsjo2's fork, which ships
+    // the same chain, clamps at three on the grounds that "later layers converged while cost and
+    // artifacts continued to grow". The range here stays 1..10 because it was asked for that way, but
+    // four and above is past where another implementation stopped finding improvement.
     //
     // The cost is exactly linear -- the model is 99% of the frame's expense and every pass pays it
     // again -- so 10 costs ten times, near enough. There is no shortcut and no amortisation: the
