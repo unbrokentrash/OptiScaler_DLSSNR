@@ -1134,7 +1134,7 @@ void ConsumeCalibrationReadback()
 }
 
 ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width,
-                              unsigned int height, bool renderTarget = false);
+                              unsigned int height, bool allowRenderTarget = false);
 
 // The probe's ring, kept entirely separate from the meter's so neither can shorten the other's
 // latency. Same four-deep shape, same reasoning: a readback with no fence needs the frames.
@@ -1399,7 +1399,7 @@ DXGI_FORMAT ProxyFormatOf(ID3D12Resource* built, DXGI_FORMAT fallback)
 }
 
 ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width,
-                              unsigned int height, bool allowRenderTarget = false)
+                              unsigned int height, bool allowRenderTarget)
 {
     D3D12_HEAP_PROPERTIES heap {};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
