@@ -78,22 +78,23 @@ committed container carries a `DXIL` part, so it came from dxc, and this is a D3
 Shader Model 6 anyway. Windows matters because `dxil.dll` — which signs the DXIL container — sits
 beside `dxc.exe` in `shader_tools`; an unsigned container is refused outside Developer Mode.
 
-### What went wrong here, so it is recognisable
+### The committed headers are build inputs, not the source of truth
 
-Eleven consecutive commits edited this shader without regenerating the header, so every build in that
-stretch shipped the shader from before them. Combined with the flat-cbuffer rule, the damage was worse
-than a no-op: the shipped shader declared **23** scalars while the host wrote **31**, so the last eight
-constants landed past the end of the cbuffer the compiled code knew about, and were simply never read:
+`just_build_no_signature.yml` — the workflow this fork is actually built from — has regenerated both
+headers from the `.hlsl` since `3f32f56`, so its artifacts do carry the shader that is in the tree even
+when the committed `.h` files are older. The other three workflows did not, and now do.
 
-    JitterX, JitterY, DejitterMode, CompLuma, CompChroma, AccumAlpha, AccumMv, ComposeMode
+That distinction matters when reading a stale committed header: it means the *repository* is stale, not
+necessarily the build you ran. Check which workflow produced the DLL before concluding anything.
 
-`ComposeMode` being among them is why every composition mode looked identical — none of them was ever
-selected. It is also why mode 3 appeared *broken* rather than merely inert: `Passthrough` (index 8) is
-inside the live range and did take effect, so the model was handed raw linear HDR while the composition
-stayed on the branch that cannot cope with it.
+The failure it protects against is silent and worth recognising. `DlssNrConstants` and the cbuffer are
+one flat run of 4-byte scalars, so a header built before a constant was appended does not mismatch
+loudly — the new constants simply land past the end of the cbuffer the compiled code declares and are
+never read. Settings that do nothing, with no error anywhere.
 
-`dxc -dumpbin DlssNr_Shader.cso | grep %Params` prints what the shipped shader really declares. That
-count must equal the scalar count in `DlssNrConstants`. When a setting "does nothing", check this first.
+`dxc -dumpbin DlssNr_Shader.cso | grep %Params` prints what a given blob declares; that scalar count
+must equal the count in `DlssNrConstants`. When a setting "does nothing", check this first — but check
+the *shipped* blob, and remember CI may have rebuilt it.
 
 ## Attribution
 
