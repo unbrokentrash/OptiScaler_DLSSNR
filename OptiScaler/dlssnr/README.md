@@ -57,17 +57,43 @@ experiment.
 
 ### Editing the shader
 
-`dlssnr.hlsl` is **precompiled**; editing it alone changes nothing. Rebuild the header:
+`dlssnr.hlsl` is **precompiled** into `DlssNr_Shader.h` (D3D12) and `DlssNr_Shader_Vk.h` (Vulkan);
+`DlssNr_Dx12.cpp` builds its pipeline straight from the `DlssNr_cso` array. Editing the `.hlsl` alone
+changes nothing at all.
+
+**The CI workflows now regenerate both headers from the `.hlsl` before MSBuild runs**, so a build
+always ships the shader that is in the tree. If you build locally, run it yourself:
 
 ```
 cd OptiScaler/shaders/dlssnr/precompile
-../../shader_tools/fxc.exe -T cs_5_0 -E CSMain -O3 dlssnr.hlsl -Fo DlssNr_Shader.cso
-python ../../shader_tools/create_header.py DlssNr_Shader.cso DlssNr_Shader.h DlssNr_cso
+..\..\shader_tools\dxc.exe -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr.hlsl -Fo DlssNr_Shader.cso
+python ..\..\shader_tools\create_header.py DlssNr_Shader.cso DlssNr_Shader.h DlssNr_cso
+
+..\..\shader_tools\dxc.exe -spirv -T cs_6_0 -E CSMain -O3 -Qstrip_debug -D VK_MODE dlssnr.hlsl -Fo DlssNr_Shader_Vk.spv
+python ..\..\shader_tools\create_header.py DlssNr_Shader_Vk.spv DlssNr_Shader_Vk.h dlssnr_spv
 ```
 
-**fxc `cs_5_0`, not the dxc in `build_precompiled_shader.bat` next to it.** Only fxc reproduces the
-committed header byte for byte; dxc emits DXIL and would silently change what the pass runs on.
-Verified by recompiling the unmodified shader both ways and diffing.
+**dxc `cs_6_0`, on Windows.** An earlier version of this file said fxc `cs_5_0`; that was wrong. The
+committed container carries a `DXIL` part, so it came from dxc, and this is a D3D12 pass that wants
+Shader Model 6 anyway. Windows matters because `dxil.dll` — which signs the DXIL container — sits
+beside `dxc.exe` in `shader_tools`; an unsigned container is refused outside Developer Mode.
+
+### What went wrong here, so it is recognisable
+
+Eleven consecutive commits edited this shader without regenerating the header, so every build in that
+stretch shipped the shader from before them. Combined with the flat-cbuffer rule, the damage was worse
+than a no-op: the shipped shader declared **23** scalars while the host wrote **31**, so the last eight
+constants landed past the end of the cbuffer the compiled code knew about, and were simply never read:
+
+    JitterX, JitterY, DejitterMode, CompLuma, CompChroma, AccumAlpha, AccumMv, ComposeMode
+
+`ComposeMode` being among them is why every composition mode looked identical — none of them was ever
+selected. It is also why mode 3 appeared *broken* rather than merely inert: `Passthrough` (index 8) is
+inside the live range and did take effect, so the model was handed raw linear HDR while the composition
+stayed on the branch that cannot cope with it.
+
+`dxc -dumpbin DlssNr_Shader.cso | grep %Params` prints what the shipped shader really declares. That
+count must equal the scalar count in `DlssNrConstants`. When a setting "does nothing", check this first.
 
 ## Attribution
 

@@ -91,6 +91,31 @@ jobs:
         echo "Version: ${{ steps.get_version.outputs.version }}"
         echo "Filename: ${{ steps.get_version.outputs.filename }}"
         
+    - name: Compile DLSS-NR shader
+      working-directory: ${{ github.workspace }}\OptiScaler\shaders\dlssnr\precompile
+      shell: powershell
+      run: |
+        # dlssnr.hlsl is precompiled into DlssNr_Shader.h / DlssNr_Shader_Vk.h, and nothing in the
+        # MSBuild project rebuilds them -- so a shader edit that is not followed by a regeneration
+        # ships the OLD shader silently, with the new constants past the end of the cbuffer the
+        # compiled code declares. Regenerating here makes the source of truth the .hlsl again.
+        # dxil.dll sits beside dxc.exe and signs the DXIL container; that is why this runs on Windows.
+        $tools = "..\..\shader_tools"
+
+        & "$tools\dxc.exe" -T cs_6_0 -E CSMain -O3 -Qstrip_debug -Qstrip_reflect dlssnr.hlsl -Fo DlssNr_Shader.cso
+        if ($LASTEXITCODE -ne 0) { throw "dxc failed to build the DXIL shader" }
+        python "$tools\create_header.py" DlssNr_Shader.cso DlssNr_Shader.h DlssNr_cso
+        if ($LASTEXITCODE -ne 0) { throw "create_header failed for the DXIL shader" }
+
+        & "$tools\dxc.exe" -spirv -T cs_6_0 -E CSMain -O3 -Qstrip_debug -D VK_MODE dlssnr.hlsl -Fo DlssNr_Shader_Vk.spv
+        if ($LASTEXITCODE -ne 0) { throw "dxc failed to build the SPIR-V shader" }
+        python "$tools\create_header.py" DlssNr_Shader_Vk.spv DlssNr_Shader_Vk.h dlssnr_spv
+        if ($LASTEXITCODE -ne 0) { throw "create_header failed for the SPIR-V shader" }
+
+        # Says out loud whether the committed headers were stale, so this is visible in the log
+        # rather than silently papered over on every run.
+        git --no-pager diff --stat -- DlssNr_Shader.h DlssNr_Shader_Vk.h
+
     - name: Add MSBuild to PATH
       uses: microsoft/setup-msbuild@v2
 
